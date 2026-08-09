@@ -31,6 +31,8 @@ pub struct MeshState {
     pub seen_ids: DashSet<String>,
     /// Último timestamp (created_at) visto por peer para backfill incremental.
     pub peer_cursors: DashMap<String, u64>,
+    /// Registro da versão mais recente de eventos substituíveis (replacement_key -> (created_at, event_id)).
+    pub latest_replaceable: DashMap<String, (u64, String)>,
     /// Canal para publicar eventos remotos no relay local.
     pub relay_tx: mpsc::Sender<String>,
     /// IDs/URLs de peers atualmente conectados (inbound e outbound).
@@ -61,21 +63,34 @@ pub fn select_replication_peers(
     }
     let target_count = (replication_factor - 1) as usize;
 
-    let candidates: Vec<&String> = connected_peers
+    let filtered: Vec<String> = connected_peers
         .iter()
         .filter(|p| source_peer.map_or(true, |src| src != *p))
+        .cloned()
         .collect();
 
-    if candidates.is_empty() {
+    if filtered.is_empty() {
         return vec![];
     }
 
+    // Deduplica conexões para evitar enviar para o mesmo nó via inbound e outbound (prefere outbound ws://)
+    let outbound: Vec<String> = filtered
+        .iter()
+        .filter(|p| p.starts_with("ws://") || p.starts_with("wss://"))
+        .cloned()
+        .collect();
+    let candidates = if !outbound.is_empty() {
+        outbound
+    } else {
+        filtered
+    };
+
     if candidates.len() <= target_count {
-        return candidates.into_iter().cloned().collect();
+        return candidates;
     }
 
     let mut scored: Vec<(&String, u64)> = candidates
-        .into_iter()
+        .iter()
         .map(|p| {
             let mut hasher = DefaultHasher::new();
             event_id.hash(&mut hasher);
@@ -118,6 +133,39 @@ pub fn replicate_event(
             state.events_replicated.fetch_add(1, Ordering::Relaxed);
         }
     }
+}
+
+/// Processa a lógica de substituição para eventos substituíveis (kinds 0, 3, 10002, 10000–19999, 30000–39999).
+/// Retorna `true` se o evento for novo/mais recente (e portanto deve ser aceito e propagado),
+/// ou `false` se for um evento antigo/obsoleto que deve ser descartado.
+pub fn process_replaceable_event(state: &MeshState, raw_event: &str) -> bool {
+    let Some(event_obj) = crate::event_types::extract_event_object(raw_event) else {
+        return true; // Não é um objeto evento, permite parse normal
+    };
+
+    let Some(key) = crate::event_types::replacement_key(&event_obj) else {
+        return true; // Não é evento substituível
+    };
+
+    let created_at = event_obj.get("created_at").and_then(|v| v.as_u64()).unwrap_or(0);
+    let event_id = event_obj.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+
+    if let Some(entry) = state.latest_replaceable.get(&key) {
+        let (stored_created_at, stored_id) = entry.value();
+        if created_at < *stored_created_at {
+            tracing::debug!("♻️ Discarding stale replaceable event {key} (created_at {created_at} < {stored_created_at})");
+            return false;
+        } else if created_at == *stored_created_at {
+            if event_id >= *stored_id {
+                tracing::debug!("♻️ Discarding tie-break lost replaceable event {key} (id {event_id} >= {stored_id})");
+                return false;
+            }
+        }
+    }
+
+    state.latest_replaceable.insert(key.clone(), (created_at, event_id.clone()));
+    info!("♻️ Updated latest replaceable event {key} (created_at={created_at}, id={event_id})");
+    true
 }
 
 /// Carrega seen_ids e peer_cursors do disco.
@@ -273,6 +321,7 @@ pub async fn run(
     let state = Arc::new(MeshState {
         seen_ids,
         peer_cursors,
+        latest_replaceable: DashMap::new(),
         relay_tx: relay_publish_tx,
         connected_peers: DashSet::new(),
         peer_channels: DashMap::new(),
@@ -303,11 +352,13 @@ pub async fn run(
                     match result {
                         Ok(event) => {
                             if let Some(id) = extract_event_id(&event.raw) {
-                                if state_clone.seen_ids.insert(id.clone()) {
-                                    info!("📡 Local relay event {id} received, replicating to peers");
-                                    replicate_event(&state_clone, &id, &event.raw, None);
-                                } else {
-                                    tracing::debug!("🔁 Relay event {id} already seen (dedup), skipping replication");
+                                if process_replaceable_event(&state_clone, &event.raw) {
+                                    if state_clone.seen_ids.insert(id.clone()) {
+                                        info!("📡 Local relay event {id} received, replicating to peers");
+                                        replicate_event(&state_clone, &id, &event.raw, None);
+                                    } else {
+                                        tracing::debug!("🔁 Relay event {id} already seen (dedup), skipping replication");
+                                    }
                                 }
                             }
                         }
@@ -686,20 +737,22 @@ async fn handle_peer_stream<Si, St>(
                                         .and_modify(|c| *c = (*c).max(ts))
                                         .or_insert(ts);
                                 }
-                                if state.seen_ids.insert(id.clone()) {
-                                    info!("📥 Event {id} received from peer {peer_id}, publishing to local relay");
-                                    let normalized = normalize_event_for_publish(&text);
-                                    if state.relay_tx.send(normalized).await.is_err() {
-                                        warn!("⚠️  Relay publish channel closed");
-                                        break;
+                                if process_replaceable_event(&state, &text) {
+                                    if state.seen_ids.insert(id.clone()) {
+                                        info!("📥 Event {id} received from peer {peer_id}, publishing to local relay");
+                                        let normalized = normalize_event_for_publish(&text);
+                                        if state.relay_tx.send(normalized).await.is_err() {
+                                            warn!("⚠️  Relay publish channel closed");
+                                            break;
+                                        }
+                                        // Resposta OK otimista apenas para eventos em tempo real (2 elementos)
+                                        if is_live_publish_event(&text) {
+                                            let ok_msg = format!(r#"["OK","{}",true,""]"#, id);
+                                            let _ = ctrl_tx.send(Message::Text(ok_msg.into())).await;
+                                        }
+                                    } else {
+                                        tracing::debug!("🔁 Event {id} from peer {peer_id} already seen (dedup), skipping relay publish");
                                     }
-                                    // Resposta OK otimista apenas para eventos em tempo real (2 elementos)
-                                    if is_live_publish_event(&text) {
-                                        let ok_msg = format!(r#"["OK","{}",true,""]"#, id);
-                                        let _ = ctrl_tx.send(Message::Text(ok_msg.into())).await;
-                                    }
-                                } else {
-                                    tracing::debug!("🔁 Event {id} from peer {peer_id} already seen (dedup), skipping relay publish");
                                 }
                             }
                         } else if text.starts_with(r#"["EOSE""#) {
@@ -1249,6 +1302,7 @@ mod tests {
         let state = MeshState {
             seen_ids: DashSet::new(),
             peer_cursors: DashMap::new(),
+            latest_replaceable: DashMap::new(),
             relay_tx: mpsc::channel(1).0,
             connected_peers: DashSet::new(),
             peer_channels: DashMap::new(),
@@ -1350,7 +1404,7 @@ mod tests {
             let _ = run(cfg_a, mock_url, None, relay_events_rx_a, relay_publish_tx_a, cancel_a).await;
         });
 
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
 
         // ── 2. Primeira Execução do Node B (porta dinâmica, seed = Node A) ──
         let tmp_listener_b1 = TcpListener::bind("127.0.0.1:0").await?;
@@ -1394,6 +1448,9 @@ mod tests {
         cancel_b1.cancel();
         tokio::time::sleep(Duration::from_millis(400)).await;
 
+        // Limpa mensagens REQ residuais no canal da primeira execução
+        while let Ok(_) = req_rx.try_recv() {}
+
         // ── 3. Reinício do Node B (porta dinâmica, reutiliza data_dir_b) ──
         let tmp_listener_b2 = TcpListener::bind("127.0.0.1:0").await?;
         let addr_b2 = tmp_listener_b2.local_addr()?;
@@ -1429,6 +1486,84 @@ mod tests {
 
         cancel.cancel();
         Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_replaceable_events_newer_overwrites_older() {
+        let state = MeshState {
+            seen_ids: DashSet::new(),
+            peer_cursors: DashMap::new(),
+            latest_replaceable: DashMap::new(),
+            relay_tx: mpsc::channel(1).0,
+            connected_peers: DashSet::new(),
+            peer_channels: DashMap::new(),
+            replication_factor: 3,
+            events_stored: AtomicU64::new(0),
+            events_replicated: AtomicU64::new(0),
+            relay_url: "ws://127.0.0.1:7777".to_string(),
+            data_dir: None,
+        };
+
+        let evt_v1 = r#"["EVENT",{"id":"id_v1","pubkey":"pub_alice","kind":0,"created_at":1000,"content":"name: Alice v1"}]"#;
+        let evt_v2 = r#"["EVENT",{"id":"id_v2","pubkey":"pub_alice","kind":0,"created_at":2000,"content":"name: Alice v2"}]"#;
+
+        assert!(process_replaceable_event(&state, evt_v1));
+        assert_eq!(state.latest_replaceable.get("pub_alice:0").map(|r| r.value().clone()), Some((1000, "id_v1".to_string())));
+
+        assert!(process_replaceable_event(&state, evt_v2));
+        assert_eq!(state.latest_replaceable.get("pub_alice:0").map(|r| r.value().clone()), Some((2000, "id_v2".to_string())));
+    }
+
+    #[tokio::test]
+    async fn test_replaceable_events_stale_discarded() {
+        let state = MeshState {
+            seen_ids: DashSet::new(),
+            peer_cursors: DashMap::new(),
+            latest_replaceable: DashMap::new(),
+            relay_tx: mpsc::channel(1).0,
+            connected_peers: DashSet::new(),
+            peer_channels: DashMap::new(),
+            replication_factor: 3,
+            events_stored: AtomicU64::new(0),
+            events_replicated: AtomicU64::new(0),
+            relay_url: "ws://127.0.0.1:7777".to_string(),
+            data_dir: None,
+        };
+
+        let evt_v2 = r#"["EVENT",{"id":"id_v2","pubkey":"pub_alice","kind":0,"created_at":2000,"content":"name: Alice v2"}]"#;
+        let evt_v1 = r#"["EVENT",{"id":"id_v1","pubkey":"pub_alice","kind":0,"created_at":1000,"content":"name: Alice v1"}]"#;
+
+        assert!(process_replaceable_event(&state, evt_v2));
+        assert!(!process_replaceable_event(&state, evt_v1), "Stale replaceable event must be discarded");
+
+        assert_eq!(state.latest_replaceable.get("pub_alice:0").map(|r| r.value().clone()), Some((2000, "id_v2".to_string())));
+    }
+
+    #[tokio::test]
+    async fn test_replaceable_events_backfill_latest_only() {
+        let state = MeshState {
+            seen_ids: DashSet::new(),
+            peer_cursors: DashMap::new(),
+            latest_replaceable: DashMap::new(),
+            relay_tx: mpsc::channel(1).0,
+            connected_peers: DashSet::new(),
+            peer_channels: DashMap::new(),
+            replication_factor: 3,
+            events_stored: AtomicU64::new(0),
+            events_replicated: AtomicU64::new(0),
+            relay_url: "ws://127.0.0.1:7777".to_string(),
+            data_dir: None,
+        };
+
+        let backfill_v1 = r#"["EVENT","sub_bf",{"id":"bf_1","pubkey":"pub_bob","kind":3,"created_at":100,"content":"contacts v1"}]"#;
+        let backfill_v3 = r#"["EVENT","sub_bf",{"id":"bf_3","pubkey":"pub_bob","kind":3,"created_at":300,"content":"contacts v3"}]"#;
+        let backfill_v2 = r#"["EVENT","sub_bf",{"id":"bf_2","pubkey":"pub_bob","kind":3,"created_at":200,"content":"contacts v2"}]"#;
+
+        assert!(process_replaceable_event(&state, backfill_v1));
+        assert!(process_replaceable_event(&state, backfill_v3));
+        assert!(!process_replaceable_event(&state, backfill_v2), "v2 is older than v3, must be rejected");
+
+        assert_eq!(state.latest_replaceable.get("pub_bob:3").map(|r| r.value().clone()), Some((300, "bf_3".to_string())));
     }
 }
 

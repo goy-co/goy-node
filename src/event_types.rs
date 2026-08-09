@@ -1,0 +1,155 @@
+//! Módulo para classificação e chaveamento de eventos Nostr (NIP-01, NIP-16, NIP-33).
+
+use serde_json::Value;
+
+/// Verifica se o `kind` é de um evento substituível (replaceable ou parameterized replaceable).
+/// NIP-01 / NIP-16 / NIP-33:
+/// - Kind 0 (metadata), Kind 3 (contacts), Kind 10002 (relay list)
+/// - Range 10000..=19999 (replaceable events)
+/// - Range 30000..=39999 (parameterized replaceable events)
+pub fn is_replaceable(kind: u64) -> bool {
+    kind == 0
+        || kind == 3
+        || kind == 10002
+        || (10000..=19999).contains(&kind)
+        || is_parameterized_replaceable(kind)
+}
+
+/// Verifica se o `kind` é de um evento substituível parametrizado (parameterized replaceable).
+/// NIP-33: Range 30000..=39999.
+pub fn is_parameterized_replaceable(kind: u64) -> bool {
+    (30000..=39999).contains(&kind)
+}
+
+/// Extrai o valor da tag "d" de um evento Nostr JSON (para parameterized replaceable).
+pub fn extract_d_tag(event: &Value) -> String {
+    if let Some(tags) = event.get("tags").and_then(|t| t.as_array()) {
+        for tag in tags {
+            if let Some(tag_arr) = tag.as_array() {
+                if tag_arr.len() >= 2 && tag_arr[0].as_str() == Some("d") {
+                    return tag_arr[1].as_str().unwrap_or("").to_string();
+                }
+            }
+        }
+    }
+    String::new()
+}
+
+/// Calcula a chave única de substituição de um evento Nostr JSON.
+/// - Replaceable normal: "{pubkey}:{kind}"
+/// - Parameterized replaceable: "{pubkey}:{kind}:{d_tag}"
+/// Retorna `None` se o evento não for substituível ou se faltarem campos obrigatórios (`pubkey`/`kind`).
+pub fn replacement_key(event: &Value) -> Option<String> {
+    let kind = event.get("kind")?.as_u64()?;
+    if !is_replaceable(kind) {
+        return None;
+    }
+    let pubkey = event.get("pubkey")?.as_str()?;
+
+    if is_parameterized_replaceable(kind) {
+        let d_tag = extract_d_tag(event);
+        Some(format!("{pubkey}:{kind}:{d_tag}"))
+    } else {
+        Some(format!("{pubkey}:{kind}"))
+    }
+}
+
+/// Extrai o objeto de evento a partir de uma mensagem Nostr JSON raw.
+/// Suporta formatos:
+/// - ["EVENT", {"id":"...", "pubkey":"...", "kind":...}]
+/// - ["EVENT", "sub_id", {"id":"...", "pubkey":"...", "kind":...}]
+pub fn extract_event_object(raw: &str) -> Option<Value> {
+    let parsed: Value = serde_json::from_str(raw).ok()?;
+    let arr = parsed.as_array()?;
+    if arr.is_empty() || arr[0].as_str() != Some("EVENT") {
+        return None;
+    }
+    if arr.len() == 2 {
+        Some(arr[1].clone())
+    } else if arr.len() >= 3 {
+        Some(arr[2].clone())
+    } else {
+        None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn test_is_replaceable() {
+        assert!(is_replaceable(0));
+        assert!(is_replaceable(3));
+        assert!(is_replaceable(10002));
+        assert!(is_replaceable(10000));
+        assert!(is_replaceable(15000));
+        assert!(is_replaceable(19999));
+        assert!(is_replaceable(30000));
+        assert!(is_replaceable(30001));
+        assert!(is_replaceable(39999));
+
+        assert!(!is_replaceable(1));
+        assert!(!is_replaceable(7));
+        assert!(!is_replaceable(9999));
+        assert!(!is_replaceable(20000));
+        assert!(!is_replaceable(40000));
+    }
+
+    #[test]
+    fn test_is_parameterized_replaceable() {
+        assert!(is_parameterized_replaceable(30000));
+        assert!(is_parameterized_replaceable(30001));
+        assert!(is_parameterized_replaceable(39999));
+
+        assert!(!is_parameterized_replaceable(0));
+        assert!(!is_parameterized_replaceable(3));
+        assert!(!is_parameterized_replaceable(10000));
+    }
+
+    #[test]
+    fn test_extract_d_tag() {
+        let event_with_d = json!({
+            "kind": 30001,
+            "pubkey": "pub123",
+            "tags": [
+                ["t", "nostr"],
+                ["d", "my-identifier"],
+                ["p", "otherpub"]
+            ]
+        });
+        assert_eq!(extract_d_tag(&event_with_d), "my-identifier");
+
+        let event_without_d = json!({
+            "kind": 30001,
+            "pubkey": "pub123",
+            "tags": [["t", "nostr"]]
+        });
+        assert_eq!(extract_d_tag(&event_without_d), "");
+    }
+
+    #[test]
+    fn test_replacement_key() {
+        let normal_rep = json!({
+            "kind": 0,
+            "pubkey": "pub_alice",
+            "created_at": 1000
+        });
+        assert_eq!(replacement_key(&normal_rep), Some("pub_alice:0".to_string()));
+
+        let param_rep = json!({
+            "kind": 30001,
+            "pubkey": "pub_bob",
+            "tags": [["d", "list-1"]]
+        });
+        assert_eq!(replacement_key(&param_rep), Some("pub_bob:30001:list-1".to_string()));
+
+        let text_note = json!({
+            "kind": 1,
+            "pubkey": "pub_carol",
+            "content": "hello"
+        });
+        assert_eq!(replacement_key(&text_note), None);
+    }
+}

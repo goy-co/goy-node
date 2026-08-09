@@ -13,6 +13,7 @@ use tracing::{error, info};
 use tracing_subscriber::{EnvFilter, fmt};
 
 mod config;
+mod event_types;
 mod mesh;
 mod registry;
 mod relay;
