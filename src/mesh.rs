@@ -4,8 +4,11 @@
 //! - Recebe eventos de peers e publica no relay local
 //! - Deduplica por event ID para evitar loops
 
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -23,19 +26,98 @@ use crate::registry::{self, RegistryClient, RelayInfo};
 use crate::relay::RelayEvent;
 
 /// Estado compartilhado entre todas as tarefas do mesh agent.
-struct MeshState {
+pub struct MeshState {
     /// Event IDs já vistos (dedup global).
-    seen_ids: DashSet<String>,
+    pub seen_ids: DashSet<String>,
     /// Último timestamp (created_at) visto por peer para backfill incremental.
-    peer_cursors: DashMap<String, u64>,
+    pub peer_cursors: DashMap<String, u64>,
     /// Canal para publicar eventos remotos no relay local.
-    relay_tx: mpsc::Sender<String>,
+    pub relay_tx: mpsc::Sender<String>,
     /// IDs/URLs de peers atualmente conectados (inbound e outbound).
-    connected_peers: DashSet<String>,
+    pub connected_peers: DashSet<String>,
+    /// Canais de controle dos peers conectados para mensagens direcionadas.
+    pub peer_channels: DashMap<String, mpsc::Sender<Message>>,
+    /// Fator de replicação N-of-M.
+    pub replication_factor: u32,
+    /// Contador de eventos armazenados no nó local.
+    pub events_stored: AtomicU64,
+    /// Contador de eventos replicados para peers.
+    pub events_replicated: AtomicU64,
     /// WebSocket URL do relay local para consultas de backfill.
-    relay_url: String,
+    pub relay_url: String,
     /// Diretório para persistência de estado em disco (opcional).
-    data_dir: Option<PathBuf>,
+    pub data_dir: Option<PathBuf>,
+}
+
+/// Seleciona deterministicamente os peers para replicação de um evento Nostr com base no event ID.
+pub fn select_replication_peers(
+    event_id: &str,
+    connected_peers: &[String],
+    source_peer: Option<&str>,
+    replication_factor: u32,
+) -> Vec<String> {
+    if replication_factor <= 1 {
+        return vec![];
+    }
+    let target_count = (replication_factor - 1) as usize;
+
+    let candidates: Vec<&String> = connected_peers
+        .iter()
+        .filter(|p| source_peer.map_or(true, |src| src != *p))
+        .collect();
+
+    if candidates.is_empty() {
+        return vec![];
+    }
+
+    if candidates.len() <= target_count {
+        return candidates.into_iter().cloned().collect();
+    }
+
+    let mut scored: Vec<(&String, u64)> = candidates
+        .into_iter()
+        .map(|p| {
+            let mut hasher = DefaultHasher::new();
+            event_id.hash(&mut hasher);
+            p.hash(&mut hasher);
+            (p, hasher.finish())
+        })
+        .collect();
+
+    // Ordenar de forma decrescente pelo score. Desempate por peer ID para estabilidade.
+    scored.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(b.0)));
+
+    scored.into_iter().take(target_count).map(|(p, _)| p.clone()).collect()
+}
+
+/// Encaminha o evento para `replication_factor - 1` peers selecionados deterministicamente.
+pub fn replicate_event(
+    state: &Arc<MeshState>,
+    event_id: &str,
+    event_raw: &str,
+    source_peer: Option<&str>,
+) {
+    state.events_stored.fetch_add(1, Ordering::Relaxed);
+
+    let replication_factor = state.replication_factor;
+    if replication_factor == 0 {
+        return;
+    }
+
+    let connected: Vec<String> = state.peer_channels.iter().map(|r| r.key().clone()).collect();
+    let targets = select_replication_peers(event_id, &connected, source_peer, replication_factor);
+
+    if targets.is_empty() {
+        return;
+    }
+
+    let msg = Message::Text(event_raw.into());
+    for target in targets {
+        if let Some(tx) = state.peer_channels.get(&target) {
+            let _ = tx.value().try_send(msg.clone());
+            state.events_replicated.fetch_add(1, Ordering::Relaxed);
+        }
+    }
 }
 
 /// Carrega seen_ids e peer_cursors do disco.
@@ -141,6 +223,7 @@ struct PeerGuard {
 impl Drop for PeerGuard {
     fn drop(&mut self) {
         self.state.connected_peers.remove(&self.peer_id);
+        self.state.peer_channels.remove(&self.peer_id);
     }
 }
 
@@ -192,6 +275,10 @@ pub async fn run(
         peer_cursors,
         relay_tx: relay_publish_tx,
         connected_peers: DashSet::new(),
+        peer_channels: DashMap::new(),
+        replication_factor: cfg.replication_factor,
+        events_stored: AtomicU64::new(0),
+        events_replicated: AtomicU64::new(0),
         relay_url,
         data_dir: data_dir.clone(),
     });
@@ -205,12 +292,8 @@ pub async fn run(
     let listener = TcpListener::bind(&cfg.listen).await?;
     info!("🌐 Mesh agent listening on {}", cfg.listen);
 
-    // Canal interno para distribuir eventos locais para todos os peers
-    let (peer_broadcast_tx, _) = broadcast::channel::<String>(4096);
-
-    // ── Task: consumir eventos do relay local → broadcast para peers ──
+    // ── Task: consumir eventos do relay local → replicar para peers ──
     let state_clone = state.clone();
-    let peer_tx_clone = peer_broadcast_tx.clone();
     let cancel_clone = cancel.clone();
     tokio::spawn(async move {
         loop {
@@ -221,10 +304,10 @@ pub async fn run(
                         Ok(event) => {
                             if let Some(id) = extract_event_id(&event.raw) {
                                 if state_clone.seen_ids.insert(id.clone()) {
-                                    info!("📡 Local relay event {id} received, broadcasting to peers");
-                                    let _ = peer_tx_clone.send(event.raw);
+                                    info!("📡 Local relay event {id} received, replicating to peers");
+                                    replicate_event(&state_clone, &id, &event.raw, None);
                                 } else {
-                                    tracing::debug!("🔁 Relay event {id} already seen (dedup), skipping broadcast");
+                                    tracing::debug!("🔁 Relay event {id} already seen (dedup), skipping replication");
                                 }
                             }
                         }
@@ -247,7 +330,6 @@ pub async fn run(
         start_seed_task(
             seed_url,
             state.clone(),
-            peer_broadcast_tx.clone(),
             heartbeat_secs,
             cancel.clone(),
         );
@@ -301,7 +383,6 @@ pub async fn run(
         let my_node_id = node_id.clone();
         let my_mesh_url = mesh_url.clone();
         let state_disc = state.clone();
-        let tx_disc = peer_broadcast_tx.clone();
         let cancel_disc = cancel.clone();
         let discovery_secs = cfg.discovery_secs;
         let data_dir_disc = data_dir.clone();
@@ -337,7 +418,6 @@ pub async fn run(
                                         start_seed_task(
                                             relay.mesh_url.clone(),
                                             state_disc.clone(),
-                                            tx_disc.clone(),
                                             hb_interval_secs,
                                             cancel_disc.clone(),
                                         );
@@ -366,7 +446,6 @@ pub async fn run(
                                             start_seed_task(
                                                 relay.mesh_url.clone(),
                                                 state_disc.clone(),
-                                                tx_disc.clone(),
                                                 hb_interval_secs,
                                                 cancel_disc.clone(),
                                             );
@@ -383,7 +462,7 @@ pub async fn run(
         info!("ℹ️  registry_url not configured, using static seeds only");
     }
 
-    // ── Task: métricas de conectividade e salvamento periódico em disco ──
+    // ── Task: métricas de replicação e salvamento periódico em disco ──
     let state_metrics = state.clone();
     let cancel_metrics = cancel.clone();
     tokio::spawn(async move {
@@ -393,8 +472,13 @@ pub async fn run(
             tokio::select! {
                 _ = cancel_metrics.cancelled() => break,
                 _ = interval.tick() => {
-                    let connected_count = state_metrics.connected_peers.len();
-                    info!("📊 Mesh status: {connected_count} peers connected");
+                    let stored = state_metrics.events_stored.load(Ordering::Relaxed);
+                    let replicated = state_metrics.events_replicated.load(Ordering::Relaxed);
+                    let active_peers = state_metrics.peer_channels.len();
+                    info!(
+                        "📊 Replication: {} events stored locally, {} replicated, replication_factor={}, active_peers={}",
+                        stored, replicated, state_metrics.replication_factor, active_peers
+                    );
                     save_state(&state_metrics);
                 }
             }
@@ -413,9 +497,8 @@ pub async fn run(
                     Ok((stream, addr)) => {
                         info!("🤝 Peer connected inbound: {addr}");
                         let state = state.clone();
-                        let peer_rx = peer_broadcast_tx.subscribe();
                         let cancel = cancel.clone();
-                        tokio::spawn(handle_inbound_peer(stream, addr, state, peer_rx, heartbeat_secs, cancel));
+                        tokio::spawn(handle_inbound_peer(stream, addr, state, heartbeat_secs, cancel));
                     }
                     Err(e) => {
                         error!("❌ Failed to accept peer connection: {e}");
@@ -435,7 +518,6 @@ pub async fn run(
 fn start_seed_task(
     seed_url: String,
     state: Arc<MeshState>,
-    peer_broadcast_tx: broadcast::Sender<String>,
     heartbeat_secs: u64,
     cancel: CancellationToken,
 ) {
@@ -452,7 +534,6 @@ fn start_seed_task(
         backoff::future::retry(backoff, || {
             let seed_url = seed_url_clone.clone();
             let state = state.clone();
-            let peer_broadcast_tx = peer_broadcast_tx.clone();
             let cancel = cancel.clone();
 
             async move {
@@ -469,9 +550,8 @@ fn start_seed_task(
                 match connect_async(&seed_url).await {
                     Ok((ws, _)) => {
                         info!("🟢 Outbound connection established to seed: {seed_url}");
-                        let peer_rx = peer_broadcast_tx.subscribe();
                         let (sink, stream) = ws.split();
-                        handle_peer_stream(seed_url.clone(), sink, stream, state, peer_rx, heartbeat_secs, cancel).await;
+                        handle_peer_stream(seed_url.clone(), sink, stream, state, heartbeat_secs, cancel).await;
                         Err::<(), _>(backoff::Error::transient(anyhow::anyhow!("seed connection ended")))
                     }
                     Err(e) => {
@@ -493,7 +573,6 @@ async fn handle_inbound_peer(
     stream: tokio::net::TcpStream,
     addr: SocketAddr,
     state: Arc<MeshState>,
-    peer_rx: broadcast::Receiver<String>,
     heartbeat_secs: u64,
     cancel: CancellationToken,
 ) {
@@ -509,7 +588,7 @@ async fn handle_inbound_peer(
 
     let peer_id = format!("inbound:{addr}");
     let (sink, stream) = ws.split();
-    handle_peer_stream(peer_id, sink, stream, state, peer_rx, heartbeat_secs, cancel).await;
+    handle_peer_stream(peer_id, sink, stream, state, heartbeat_secs, cancel).await;
 }
 
 /// Handler unificado de sessão peer bidirecional (independente de inbound ou outbound).
@@ -518,7 +597,6 @@ async fn handle_peer_stream<Si, St>(
     mut sink: Si,
     mut stream: St,
     state: Arc<MeshState>,
-    mut peer_rx: broadcast::Receiver<String>,
     heartbeat_secs: u64,
     cancel: CancellationToken,
 ) where
@@ -529,6 +607,12 @@ async fn handle_peer_stream<Si, St>(
         warn!("⚠️ Already connected to peer {peer_id}, skipping duplicate session");
         return;
     }
+
+    // Canal interno para enviar mensagens ao peer (heartbeats, OK, EOSE, backfill, eventos replicados)
+    let (ctrl_tx, mut ctrl_rx) = mpsc::channel::<Message>(256);
+
+    state.peer_channels.insert(peer_id.clone(), ctrl_tx.clone());
+
     let _guard = PeerGuard {
         state: state.clone(),
         peer_id: peer_id.clone(),
@@ -536,10 +620,7 @@ async fn handle_peer_stream<Si, St>(
 
     info!("🤝 Active peer session: {peer_id}");
 
-    // Canal interno para enviar mensagens de controle (pong, OK, EOSE, backfill) ao sink
-    let (ctrl_tx, mut ctrl_rx) = mpsc::channel::<Message>(256);
-
-    // ── Task: enviar eventos locais + mensagens de controle + heartbeats periódicos ──
+    // ── Task: enviar mensagens de controle + heartbeats periódicos ao peer ──
     let cancel_clone = cancel.clone();
     let heartbeat_secs_clone = heartbeat_secs;
     let send_task = tokio::spawn(async move {
@@ -556,22 +637,9 @@ async fn handle_peer_stream<Si, St>(
                         break;
                     }
                 }
-                // Mensagens de controle (pong, OK, EOSE, backfill) têm prioridade
                 Some(ctrl_msg) = ctrl_rx.recv() => {
                     if sink.send(ctrl_msg).await.is_err() {
                         break;
-                    }
-                }
-                // Eventos do relay local para encaminhar ao peer
-                result = peer_rx.recv() => {
-                    match result {
-                        Ok(raw) => {
-                            if sink.send(Message::Text(raw.into())).await.is_err() {
-                                break;
-                            }
-                        }
-                        Err(broadcast::error::RecvError::Lagged(_)) => continue,
-                        Err(broadcast::error::RecvError::Closed) => break,
                     }
                 }
             }
@@ -630,6 +698,8 @@ async fn handle_peer_stream<Si, St>(
                                         let ok_msg = format!(r#"["OK","{}",true,""]"#, id);
                                         let _ = ctrl_tx.send(Message::Text(ok_msg.into())).await;
                                     }
+                                    // Replicar o evento para os N-1 peers selecionados (excluindo a origem)
+                                    replicate_event(&state, &id, &text, Some(&peer_id));
                                 } else {
                                     tracing::debug!("🔁 Event {id} from peer {peer_id} already seen (dedup), skipping relay publish");
                                 }
@@ -868,6 +938,7 @@ mod tests {
             discovery_secs: 60,
             mesh_url: None,
             node_id: None,
+            replication_factor: 3,
         };
 
         let cancel_mesh = cancel.clone();
@@ -939,6 +1010,7 @@ mod tests {
             discovery_secs: 60,
             mesh_url: None,
             node_id: None,
+            replication_factor: 3,
         };
 
         let cancel_a = cancel.clone();
@@ -958,6 +1030,7 @@ mod tests {
             discovery_secs: 60,
             mesh_url: None,
             node_id: None,
+            replication_factor: 3,
         };
 
         let cancel_b = cancel.clone();
@@ -1052,6 +1125,7 @@ mod tests {
             discovery_secs: 60,
             mesh_url: None,
             node_id: None,
+            replication_factor: 3,
         };
 
         let cancel_a = cancel.clone();
@@ -1071,6 +1145,7 @@ mod tests {
             discovery_secs: 60,
             mesh_url: None,
             node_id: None,
+            replication_factor: 3,
         };
 
         let cancel_b = cancel.clone();
@@ -1128,6 +1203,7 @@ mod tests {
             discovery_secs: 60,
             mesh_url: None,
             node_id: None,
+            replication_factor: 3,
         };
 
         let cancel_a = cancel.clone();
@@ -1177,6 +1253,10 @@ mod tests {
             peer_cursors: DashMap::new(),
             relay_tx: mpsc::channel(1).0,
             connected_peers: DashSet::new(),
+            peer_channels: DashMap::new(),
+            replication_factor: 3,
+            events_stored: AtomicU64::new(0),
+            events_replicated: AtomicU64::new(0),
             relay_url: "ws://127.0.0.1:7777".to_string(),
             data_dir: Some(data_dir.clone()),
         };
@@ -1265,6 +1345,7 @@ mod tests {
             discovery_secs: 60,
             mesh_url: Some(seed_a.clone()),
             node_id: Some("node-A".to_string()),
+            replication_factor: 3,
         };
         let cancel_a = cancel.clone();
         tokio::spawn(async move {
@@ -1291,6 +1372,7 @@ mod tests {
             discovery_secs: 60,
             mesh_url: Some(format!("ws://{addr_b1}")),
             node_id: Some("node-B".to_string()),
+            replication_factor: 3,
         };
 
         let c_b1 = cancel_b1.clone();
@@ -1332,6 +1414,7 @@ mod tests {
             discovery_secs: 60,
             mesh_url: Some(format!("ws://{addr_b2}")),
             node_id: Some("node-B".to_string()),
+            replication_factor: 3,
         };
 
         let c_b2 = cancel_b2.clone();

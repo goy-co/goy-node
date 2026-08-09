@@ -155,6 +155,7 @@ async fn test_three_nodes_dynamic_discovery_full_mesh() -> anyhow::Result<()> {
         discovery_secs: 1,
         mesh_url: Some("ws://127.0.0.1:19501".to_string()),
         node_id: Some("node-A".to_string()),
+        replication_factor: 3,
     };
 
     let c_a = cancel.clone();
@@ -173,6 +174,7 @@ async fn test_three_nodes_dynamic_discovery_full_mesh() -> anyhow::Result<()> {
         discovery_secs: 1,
         mesh_url: Some("ws://127.0.0.1:19502".to_string()),
         node_id: Some("node-B".to_string()),
+        replication_factor: 3,
     };
 
     let c_b = cancel.clone();
@@ -194,6 +196,7 @@ async fn test_three_nodes_dynamic_discovery_full_mesh() -> anyhow::Result<()> {
         discovery_secs: 1,
         mesh_url: Some("ws://127.0.0.1:19503".to_string()),
         node_id: Some("node-C".to_string()),
+        replication_factor: 3,
     };
 
     let c_c = cancel.clone();
@@ -246,6 +249,7 @@ async fn test_registry_resilience_outage_and_recovery() -> anyhow::Result<()> {
         discovery_secs: 1,
         mesh_url: Some("ws://127.0.0.1:19511".to_string()),
         node_id: Some("node-A-resilient".to_string()),
+        replication_factor: 3,
     };
 
     let c_a = cancel.clone();
@@ -265,6 +269,7 @@ async fn test_registry_resilience_outage_and_recovery() -> anyhow::Result<()> {
         discovery_secs: 1,
         mesh_url: Some("ws://127.0.0.1:19512".to_string()),
         node_id: Some("node-B-resilient".to_string()),
+        replication_factor: 3,
     };
 
     let c_b = cancel.clone();

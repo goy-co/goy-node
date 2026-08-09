@@ -22,6 +22,7 @@ async fn test_outbound_seed_reconnect_and_sync() -> anyhow::Result<()> {
         discovery_secs: 60,
         mesh_url: None,
         node_id: None,
+        replication_factor: 3,
     };
 
     let cancel_a = cancel.clone();
@@ -41,6 +42,7 @@ async fn test_outbound_seed_reconnect_and_sync() -> anyhow::Result<()> {
         discovery_secs: 60,
         mesh_url: None,
         node_id: None,
+        replication_factor: 3,
     };
 
     let cancel_b = cancel.clone();
@@ -105,6 +107,7 @@ async fn test_mesh_deduplication_triangle_loop() -> anyhow::Result<()> {
         discovery_secs: 60,
         mesh_url: None,
         node_id: None,
+        replication_factor: 3,
     };
     let cfg_b = MeshConfig {
         listen: "127.0.0.1:19452".to_string(),
@@ -114,6 +117,7 @@ async fn test_mesh_deduplication_triangle_loop() -> anyhow::Result<()> {
         discovery_secs: 60,
         mesh_url: None,
         node_id: None,
+        replication_factor: 3,
     };
     let cfg_c = MeshConfig {
         listen: "127.0.0.1:19453".to_string(),
@@ -123,6 +127,7 @@ async fn test_mesh_deduplication_triangle_loop() -> anyhow::Result<()> {
         discovery_secs: 60,
         mesh_url: None,
         node_id: None,
+        replication_factor: 3,
     };
 
     let c_a = cancel.clone();
