@@ -62,6 +62,9 @@ pub struct MeshConfig {
     pub mesh_url: Option<String>,
     /// ID único do nó no mesh/registry (opcional override)
     pub node_id: Option<String>,
+    /// Fator de replicação N-of-M (default: 3). 0 = desativar replicação ativa
+    #[serde(default = "default_replication_factor")]
+    pub replication_factor: u32,
 }
 
 fn default_heartbeat() -> u64 {
@@ -70,6 +73,10 @@ fn default_heartbeat() -> u64 {
 
 fn default_discovery() -> u64 {
     60
+}
+
+fn default_replication_factor() -> u32 {
+    3
 }
 
 impl Config {
@@ -156,6 +163,13 @@ impl Config {
         if let Ok(id) = std::env::var("GOY_NODE_ID") {
             info!("🔧 Override from env GOY_NODE_ID: {id}");
             self.mesh.node_id = Some(id);
+        }
+
+        if let Ok(rf_raw) = std::env::var("GOY_NODE_REPLICATION_FACTOR") {
+            if let Ok(rf) = rf_raw.parse::<u32>() {
+                info!("🔧 Override from env GOY_NODE_REPLICATION_FACTOR: {rf}");
+                self.mesh.replication_factor = rf;
+            }
         }
     }
 
@@ -394,6 +408,7 @@ mod tests {
             std::env::set_var("GOY_NODE_MESH_DISCOVERY_SECS", "45");
             std::env::set_var("GOY_NODE_MESH_URL", "ws://override.tailnet:8443");
             std::env::set_var("GOY_NODE_ID", "node-override-id");
+            std::env::set_var("GOY_NODE_REPLICATION_FACTOR", "5");
         }
 
         let mut cfg = Config::default();
@@ -406,6 +421,7 @@ mod tests {
         assert_eq!(cfg.mesh.discovery_secs, 45);
         assert_eq!(cfg.mesh.mesh_url, Some("ws://override.tailnet:8443".to_string()));
         assert_eq!(cfg.mesh.node_id, Some("node-override-id".to_string()));
+        assert_eq!(cfg.mesh.replication_factor, 5);
         assert!(cfg.validate().is_ok());
 
         unsafe {
@@ -416,6 +432,7 @@ mod tests {
             std::env::remove_var("GOY_NODE_MESH_DISCOVERY_SECS");
             std::env::remove_var("GOY_NODE_MESH_URL");
             std::env::remove_var("GOY_NODE_ID");
+            std::env::remove_var("GOY_NODE_REPLICATION_FACTOR");
         }
     }
 }
