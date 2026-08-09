@@ -584,6 +584,7 @@ async fn handle_peer_stream<Si, St>(
         .get(&peer_id)
         .map(|c| *c.value())
         .unwrap_or(0);
+    info!("🔄 Sending initial backfill REQ to peer {peer_id} with cursor={cursor}");
     let backfill_req = format!(r#"["REQ","goy-backfill",{{"since":{},"limit":500}}]"#, cursor);
     let _ = ctrl_tx.send(Message::Text(backfill_req.into())).await;
 
@@ -1008,8 +1009,10 @@ mod tests {
 
         let cancel = CancellationToken::new();
 
-        // ── 1. Subir servidor WebSocket Mock Relay para o Node A (escuta em 127.0.0.1:27777) ──
-        let mock_listener = TcpListener::bind("127.0.0.1:27777").await?;
+        // ── 1. Subir servidor WebSocket Mock Relay para o Node A (escuta em porta dinâmica) ──
+        let mock_listener = TcpListener::bind("127.0.0.1:0").await?;
+        let mock_addr = mock_listener.local_addr()?;
+        let mock_url = format!("ws://{mock_addr}");
         let cancel_mock = cancel.clone();
         tokio::spawn(async move {
             loop {
@@ -1037,7 +1040,7 @@ mod tests {
             }
         });
 
-        // ── 2. Node A (configurado com mock relay url ws://127.0.0.1:27777, escuta em 18450) ──
+        // ── 2. Node A (configurado com mock relay url, escuta em 18450) ──
         let (relay_events_tx_a, relay_events_rx_a) = broadcast::channel::<RelayEvent>(16);
         let (relay_publish_tx_a, _relay_publish_rx_a) = mpsc::channel::<String>(16);
 
@@ -1053,7 +1056,7 @@ mod tests {
 
         let cancel_a = cancel.clone();
         tokio::spawn(async move {
-            let _ = run(cfg_a, "ws://127.0.0.1:27777".to_string(), None, relay_events_rx_a, relay_publish_tx_a, cancel_a).await;
+            let _ = run(cfg_a, mock_url, None, relay_events_rx_a, relay_publish_tx_a, cancel_a).await;
         });
 
         // ── 3. Node B (seed = Node A, escuta em 18451) ──
@@ -1203,13 +1206,17 @@ mod tests {
         use tokio::net::TcpListener;
         use tokio_tungstenite::accept_async;
 
+        let _ = tracing_subscriber::fmt().with_env_filter("info").try_init();
+
         let temp_dir = tempfile::tempdir()?;
         let data_dir_b = temp_dir.path().to_path_buf();
 
         let cancel = CancellationToken::new();
 
-        // ── Mock Relay do Node A (escuta em 27778) ──
-        let mock_listener = TcpListener::bind("127.0.0.1:27778").await?;
+        // ── Mock Relay do Node A (escuta em porta dinâmica) ──
+        let mock_listener = TcpListener::bind("127.0.0.1:0").await?;
+        let mock_addr = mock_listener.local_addr()?;
+        let mock_url = format!("ws://{mock_addr}");
         let (req_tx, mut req_rx) = mpsc::channel::<String>(16);
 
         let cancel_mock = cancel.clone();
@@ -1219,56 +1226,71 @@ mod tests {
                     _ = cancel_mock.cancelled() => break,
                     res = mock_listener.accept() => {
                         if let Ok((stream, _)) = res {
-                            if let Ok(mut ws) = accept_async(stream).await {
-                                while let Some(Ok(msg)) = ws.next().await {
-                                    if let Message::Text(text) = msg {
-                                        if text.starts_with(r#"["REQ""#) {
-                                            let _ = req_tx.send(text.clone()).await;
-                                            let hist_evt = r#"["EVENT","goy-backfill",{"id":"hist_ts_1","created_at":1786000500,"content":"ts data"}]"#;
-                                            let eose = r#"["EOSE","goy-backfill"]"#;
-                                            let _ = ws.send(Message::Text(hist_evt.into())).await;
-                                            let _ = ws.send(Message::Text(eose.into())).await;
-                                            break;
+                            let req_tx = req_tx.clone();
+                            tokio::spawn(async move {
+                                if let Ok(mut ws) = accept_async(stream).await {
+                                    while let Some(Ok(msg)) = ws.next().await {
+                                        if let Message::Text(text) = msg {
+                                            if text.starts_with(r#"["REQ""#) {
+                                                let _ = req_tx.send(text.clone()).await;
+                                                let hist_evt = r#"["EVENT","goy-backfill",{"id":"hist_ts_1","created_at":1786000500,"content":"ts data"}]"#;
+                                                let eose = r#"["EOSE","goy-backfill"]"#;
+                                                let _ = ws.send(Message::Text(hist_evt.into())).await;
+                                                let _ = ws.send(Message::Text(eose.into())).await;
+                                            }
                                         }
                                     }
                                 }
-                            }
+                            });
                         }
                     }
                 }
             }
         });
 
-        // ── 1. Node A (18470) ──
+        // ── 1. Node A (porta dinâmica) ──
+        let tmp_listener_a = TcpListener::bind("127.0.0.1:0").await?;
+        let addr_a = tmp_listener_a.local_addr()?;
+        drop(tmp_listener_a);
+        let listen_a = addr_a.to_string();
+        let seed_a = format!("ws://{addr_a}");
+
         let (_relay_events_tx_a, relay_events_rx_a) = broadcast::channel::<RelayEvent>(16);
         let (relay_publish_tx_a, _relay_publish_rx_a) = mpsc::channel::<String>(16);
         let cfg_a = MeshConfig {
-            listen: "127.0.0.1:18470".to_string(),
+            listen: listen_a.clone(),
             seeds: vec![],
             registry_url: None,
             heartbeat_secs: 30,
             discovery_secs: 60,
-            mesh_url: None,
-            node_id: None,
+            mesh_url: Some(seed_a.clone()),
+            node_id: Some("node-A".to_string()),
         };
         let cancel_a = cancel.clone();
         tokio::spawn(async move {
-            let _ = run(cfg_a, "ws://127.0.0.1:27778".to_string(), None, relay_events_rx_a, relay_publish_tx_a, cancel_a).await;
+            let _ = run(cfg_a, mock_url, None, relay_events_rx_a, relay_publish_tx_a, cancel_a).await;
         });
 
-        // ── 2. Primeira Execução do Node B (18471, seed = 18470) ──
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        // ── 2. Primeira Execução do Node B (porta dinâmica, seed = Node A) ──
+        let tmp_listener_b1 = TcpListener::bind("127.0.0.1:0").await?;
+        let addr_b1 = tmp_listener_b1.local_addr()?;
+        drop(tmp_listener_b1);
+        let listen_b1 = addr_b1.to_string();
+
         let cancel_b1 = CancellationToken::new();
         let (_relay_events_tx_b, relay_events_rx_b) = broadcast::channel::<RelayEvent>(16);
         let (relay_publish_tx_b, mut relay_publish_rx_b) = mpsc::channel::<String>(16);
 
         let cfg_b = MeshConfig {
-            listen: "127.0.0.1:18471".to_string(),
-            seeds: vec!["ws://127.0.0.1:18470".to_string()],
+            listen: listen_b1,
+            seeds: vec![seed_a.clone()],
             registry_url: None,
             heartbeat_secs: 30,
             discovery_secs: 60,
-            mesh_url: None,
-            node_id: None,
+            mesh_url: Some(format!("ws://{addr_b1}")),
+            node_id: Some("node-B".to_string()),
         };
 
         let c_b1 = cancel_b1.clone();
@@ -1278,33 +1300,38 @@ mod tests {
         });
 
         // Primeiro REQ recebido no Mock Relay deve ser since: 0
-        let req_1 = tokio::time::timeout(Duration::from_secs(3), req_rx.recv())
+        let req_1 = tokio::time::timeout(Duration::from_secs(5), req_rx.recv())
             .await?
             .ok_or_else(|| anyhow::anyhow!("Mock relay did not receive first REQ"))?;
         assert!(req_1.contains(r#""since":0"#));
 
         // Node B recebe o evento histórico com created_at = 1786000500
-        let _received_b1 = tokio::time::timeout(Duration::from_secs(3), relay_publish_rx_b.recv())
+        let _received_b1 = tokio::time::timeout(Duration::from_secs(5), relay_publish_rx_b.recv())
             .await?
             .ok_or_else(|| anyhow::anyhow!("Node B1 did not receive backfill event"))?;
 
         // Cancela a primeira execução do Node B (shutdown gracioso salva o cursor 1786000500)
         cancel_b1.cancel();
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        tokio::time::sleep(Duration::from_millis(400)).await;
 
-        // ── 3. Reinício do Node B (reutiliza data_dir_b) ──
+        // ── 3. Reinício do Node B (porta dinâmica, reutiliza data_dir_b) ──
+        let tmp_listener_b2 = TcpListener::bind("127.0.0.1:0").await?;
+        let addr_b2 = tmp_listener_b2.local_addr()?;
+        drop(tmp_listener_b2);
+        let listen_b2 = addr_b2.to_string();
+
         let cancel_b2 = cancel.clone();
         let (_relay_events_tx_b2, relay_events_rx_b2) = broadcast::channel::<RelayEvent>(16);
         let (relay_publish_tx_b2, _relay_publish_rx_b2) = mpsc::channel::<String>(16);
 
         let cfg_b2 = MeshConfig {
-            listen: "127.0.0.1:18472".to_string(),
-            seeds: vec!["ws://127.0.0.1:18470".to_string()],
+            listen: listen_b2,
+            seeds: vec![seed_a.clone()],
             registry_url: None,
             heartbeat_secs: 30,
             discovery_secs: 60,
-            mesh_url: None,
-            node_id: None,
+            mesh_url: Some(format!("ws://{addr_b2}")),
+            node_id: Some("node-B".to_string()),
         };
 
         let c_b2 = cancel_b2.clone();
@@ -1314,7 +1341,7 @@ mod tests {
         });
 
         // O segundo REQ recebido no Mock Relay deve usar o cursor salvo: since: 1786000500!
-        let req_2 = tokio::time::timeout(Duration::from_secs(3), req_rx.recv())
+        let req_2 = tokio::time::timeout(Duration::from_secs(5), req_rx.recv())
             .await?
             .ok_or_else(|| anyhow::anyhow!("Mock relay did not receive second REQ after restart"))?;
         assert!(req_2.contains(r#""since":1786000500"#));

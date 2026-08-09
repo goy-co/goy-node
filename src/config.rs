@@ -297,8 +297,21 @@ pub fn detect_mesh_url(listen_addr: &str, override_url: Option<&str>) -> String 
 mod tests {
     use super::*;
 
+    static ENV_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn test_load_or_generate_creates_default_config_file() -> anyhow::Result<()> {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        unsafe {
+            std::env::remove_var("GOY_NODE_RELAY_URL");
+            std::env::remove_var("GOY_NODE_MESH_LISTEN");
+            std::env::remove_var("GOY_NODE_MESH_SEEDS");
+            std::env::remove_var("GOY_NODE_MESH_HEARTBEAT_SECS");
+            std::env::remove_var("GOY_NODE_MESH_DISCOVERY_SECS");
+            std::env::remove_var("GOY_NODE_MESH_URL");
+            std::env::remove_var("GOY_NODE_ID");
+        }
+
         let temp_dir = tempfile::tempdir()?;
         let config_path = temp_dir.path().join("sub/config.toml");
 
@@ -372,6 +385,7 @@ mod tests {
 
     #[test]
     fn test_env_override_precedence() {
+        let _lock = ENV_MUTEX.lock().unwrap();
         unsafe {
             std::env::set_var("GOY_NODE_RELAY_URL", "ws://10.0.0.99:9999");
             std::env::set_var("GOY_NODE_MESH_LISTEN", "127.0.0.1:9443");
