@@ -65,6 +65,15 @@ pub struct MeshConfig {
     /// Fator de replicação N-of-M (default: 3). 0 = desativar replicação ativa
     #[serde(default = "default_replication_factor")]
     pub replication_factor: u32,
+    /// Limite de eventos por segundo por peer (default: 50)
+    #[serde(default = "default_max_events_per_sec")]
+    pub max_events_per_second_per_peer: u32,
+    /// Limite de bytes por segundo por peer (default: 1MB = 1048576)
+    #[serde(default = "default_max_bytes_per_sec")]
+    pub max_bytes_per_second_per_peer: u64,
+    /// Tamanho máximo de mensagem recebida em bytes (default: 512KB = 524288)
+    #[serde(default = "default_max_msg_size")]
+    pub max_message_size: usize,
 }
 
 fn default_heartbeat() -> u64 {
@@ -77,6 +86,18 @@ fn default_discovery() -> u64 {
 
 fn default_replication_factor() -> u32 {
     3
+}
+
+fn default_max_events_per_sec() -> u32 {
+    50
+}
+
+fn default_max_bytes_per_sec() -> u64 {
+    1_048_576
+}
+
+fn default_max_msg_size() -> usize {
+    524_288
 }
 
 impl Config {
@@ -171,6 +192,27 @@ impl Config {
                 self.mesh.replication_factor = rf;
             }
         }
+
+        if let Ok(v_raw) = std::env::var("GOY_NODE_MAX_EVENTS_PER_SEC") {
+            if let Ok(v) = v_raw.parse::<u32>() {
+                info!("🔧 Override from env GOY_NODE_MAX_EVENTS_PER_SEC: {v}");
+                self.mesh.max_events_per_second_per_peer = v;
+            }
+        }
+
+        if let Ok(v_raw) = std::env::var("GOY_NODE_MAX_BYTES_PER_SEC") {
+            if let Ok(v) = v_raw.parse::<u64>() {
+                info!("🔧 Override from env GOY_NODE_MAX_BYTES_PER_SEC: {v}");
+                self.mesh.max_bytes_per_second_per_peer = v;
+            }
+        }
+
+        if let Ok(v_raw) = std::env::var("GOY_NODE_MAX_MSG_SIZE") {
+            if let Ok(v) = v_raw.parse::<usize>() {
+                info!("🔧 Override from env GOY_NODE_MAX_MSG_SIZE: {v}");
+                self.mesh.max_message_size = v;
+            }
+        }
     }
 
     /// Valida rigorosamente todos os campos da configuração.
@@ -236,6 +278,9 @@ impl Default for Config {
                 mesh_url: None,
                 node_id: None,
                 replication_factor: default_replication_factor(),
+                max_events_per_second_per_peer: default_max_events_per_sec(),
+                max_bytes_per_second_per_peer: default_max_bytes_per_sec(),
+                max_message_size: default_max_msg_size(),
             },
         }
     }
