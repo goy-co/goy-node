@@ -19,6 +19,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
 use crate::config::MeshConfig;
+use crate::registry::{self, RegistryClient, RelayInfo};
 use crate::relay::RelayEvent;
 
 /// Estado compartilhado entre todas as tarefas do mesh agent.
@@ -143,6 +144,38 @@ impl Drop for PeerGuard {
     }
 }
 
+/// Carrega ou gera o ID único do nó (`node_id`).
+fn load_or_generate_node_id(cfg_node_id: Option<&str>, data_dir: Option<&Path>) -> String {
+    if let Some(id) = cfg_node_id {
+        let trimmed = id.trim();
+        if !trimmed.is_empty() {
+            return trimmed.to_string();
+        }
+    }
+
+    if let Some(dir) = data_dir {
+        let path = dir.join("node_id.txt");
+        if path.exists() {
+            if let Ok(id) = std::fs::read_to_string(&path) {
+                let trimmed = id.trim().to_string();
+                if !trimmed.is_empty() {
+                    return trimmed;
+                }
+            }
+        }
+        let new_id = uuid::Uuid::new_v4().to_string();
+        if let Err(e) = std::fs::create_dir_all(dir) {
+            warn!("⚠️ Failed to create data directory {}: {e}", dir.display());
+        }
+        if let Err(e) = std::fs::write(&path, &new_id) {
+            warn!("⚠️ Failed to write node_id.txt at {}: {e}", path.display());
+        }
+        return new_id;
+    }
+
+    uuid::Uuid::new_v4().to_string()
+}
+
 /// Inicia o mesh agent: listener para peers + seeds outbound + consumer de eventos locais.
 pub async fn run(
     cfg: MeshConfig,
@@ -160,8 +193,13 @@ pub async fn run(
         relay_tx: relay_publish_tx,
         connected_peers: DashSet::new(),
         relay_url,
-        data_dir,
+        data_dir: data_dir.clone(),
     });
+
+    // ── Node ID & Mesh URL Auto-detection ──────────────────────────────
+    let node_id = load_or_generate_node_id(cfg.node_id.as_deref(), data_dir.as_deref());
+    let mesh_url = crate::config::detect_mesh_url(&cfg.listen, cfg.mesh_url.as_deref());
+    info!("🆔 Node ID: {node_id}");
 
     // ── Listener para peers ────────────────────────────────────────────
     let listener = TcpListener::bind(&cfg.listen).await?;
@@ -203,7 +241,7 @@ pub async fn run(
         }
     });
 
-    // ── Tasks: conexões outbound com seeds ─────────────────────────────
+    // ── Tasks: conexões outbound com seeds estáticos ──────────────────
     let heartbeat_secs = cfg.heartbeat_secs;
     for seed_url in cfg.seeds.clone() {
         start_seed_task(
@@ -213,6 +251,136 @@ pub async fn run(
             heartbeat_secs,
             cancel.clone(),
         );
+    }
+
+    // ── Registry Central & Dynamic Peer Discovery ──────────────────────
+    if let Some(ref registry_url) = cfg.registry_url {
+        let registry_client = RegistryClient::new(registry_url.clone());
+        let relay_info = RelayInfo {
+            node_id: node_id.clone(),
+            relay_url: state.relay_url.clone(),
+            mesh_url: mesh_url.clone(),
+            version: env!("CARGO_PKG_VERSION").to_string(),
+            capabilities: vec!["nostr".to_string(), "mesh".to_string()],
+            last_seen: None,
+        };
+
+        // Registo inicial na startup (POST /relays)
+        if let Err(e) = registry_client.register(&relay_info).await {
+            warn!("⚠️ Initial registry registration failed at {registry_url}: {e}. Operating with static seeds/cache.");
+        }
+
+        // Task: Heartbeat periódico no registry (PUT /relays/{node_id}) + Deregisto no shutdown (DELETE)
+        let heartbeat_client = registry_client.clone();
+        let heartbeat_node_id = node_id.clone();
+        let cancel_heartbeat = cancel.clone();
+        let hb_interval_secs = cfg.heartbeat_secs;
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(hb_interval_secs));
+            interval.tick().await; // ignora o primeiro tick imediato
+
+            loop {
+                tokio::select! {
+                    _ = cancel_heartbeat.cancelled() => break,
+                    _ = interval.tick() => {
+                        if let Err(e) = heartbeat_client.heartbeat(&heartbeat_node_id).await {
+                            warn!("⚠️ Registry heartbeat failed: {e}");
+                        }
+                    }
+                }
+            }
+
+            // Deregisto gracioso no shutdown
+            if let Err(e) = heartbeat_client.deregister(&heartbeat_node_id).await {
+                warn!("⚠️ Registry deregistration failed on shutdown: {e}");
+            }
+        });
+
+        // Task: Descoberta periódica de peers no registry (GET /relays)
+        let discovery_client = registry_client.clone();
+        let my_node_id = node_id.clone();
+        let my_mesh_url = mesh_url.clone();
+        let state_disc = state.clone();
+        let tx_disc = peer_broadcast_tx.clone();
+        let cancel_disc = cancel.clone();
+        let discovery_secs = cfg.discovery_secs;
+        let data_dir_disc = data_dir.clone();
+
+        tokio::spawn(async move {
+            let missing_cycles: DashMap<String, u32> = DashMap::new();
+            let mut interval = tokio::time::interval(Duration::from_secs(discovery_secs));
+
+            loop {
+                tokio::select! {
+                    _ = cancel_disc.cancelled() => break,
+                    _ = interval.tick() => {
+                        match discovery_client.fetch_relays().await {
+                            Ok(relays) => {
+                                if let Some(ref dir) = data_dir_disc {
+                                    registry::save_cached_peers(dir, &relays);
+                                }
+
+                                let active_mesh_urls: std::collections::HashSet<String> = relays
+                                    .iter()
+                                    .map(|r| r.mesh_url.clone())
+                                    .collect();
+
+                                for relay in relays {
+                                    if relay.node_id == my_node_id || relay.mesh_url == my_mesh_url {
+                                        continue;
+                                    }
+
+                                    missing_cycles.remove(&relay.mesh_url);
+
+                                    if !state_disc.connected_peers.contains(&relay.mesh_url) {
+                                        info!("🌐 Dynamic peer discovered from registry: {} ({})", relay.mesh_url, relay.node_id);
+                                        start_seed_task(
+                                            relay.mesh_url.clone(),
+                                            state_disc.clone(),
+                                            tx_disc.clone(),
+                                            hb_interval_secs,
+                                            cancel_disc.clone(),
+                                        );
+                                    }
+                                }
+
+                                for mut entry in missing_cycles.iter_mut() {
+                                    if !active_mesh_urls.contains(entry.key()) {
+                                        *entry.value_mut() += 1;
+                                        if *entry.value() >= 3 {
+                                            warn!("⚠️ Peer {} absent from registry for {} cycles", entry.key(), entry.value());
+                                        }
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                warn!("⚠️ Dynamic peer discovery failed: {e}. Falling back to cached peers.");
+                                if let Some(ref dir) = data_dir_disc {
+                                    let cached = registry::load_cached_peers(dir);
+                                    for relay in cached {
+                                        if relay.node_id == my_node_id || relay.mesh_url == my_mesh_url {
+                                            continue;
+                                        }
+                                        if !state_disc.connected_peers.contains(&relay.mesh_url) {
+                                            info!("🌐 Connecting to cached peer: {}", relay.mesh_url);
+                                            start_seed_task(
+                                                relay.mesh_url.clone(),
+                                                state_disc.clone(),
+                                                tx_disc.clone(),
+                                                hb_interval_secs,
+                                                cancel_disc.clone(),
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        });
+    } else {
+        info!("ℹ️  registry_url not configured, using static seeds only");
     }
 
     // ── Task: métricas de conectividade e salvamento periódico em disco ──

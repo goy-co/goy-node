@@ -46,6 +46,7 @@ impl RegistryClient {
     }
 
     /// Retorna a URL base do registry.
+    #[allow(dead_code)]
     pub fn registry_url(&self) -> &str {
         &self.registry_url
     }
