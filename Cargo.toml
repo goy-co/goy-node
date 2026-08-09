@@ -7,9 +7,14 @@ description = "Mesh agent for Goy Node — automatic Nostr relay synchronization
 license = "Proprietary"
 repository = "https://github.com/the-goy-company/goy-node"
 
+[lib]
+name = "goy_node"
+path = "src/lib.rs"
+
 [[bin]]
 name = "goy-node"
 path = "src/main.rs"
+
 
 [dependencies]
 # Async runtime
