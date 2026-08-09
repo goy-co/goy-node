@@ -1,0 +1,68 @@
+[package]
+name = "goy-node"
+version = "0.1.0"
+edition = "2024"
+authors = ["The Goy Company"]
+description = "Mesh agent for Goy Node — automatic Nostr relay synchronization"
+license = "Proprietary"
+repository = "https://github.com/the-goy-company/goy-node"
+
+[[bin]]
+name = "goy-node"
+path = "src/main.rs"
+
+[dependencies]
+# Async runtime
+tokio = { version = "1", features = ["full", "signal"] }
+
+# WebSocket client/server (conexão com relay local + peers)
+tokio-tungstenite = { version = "0.24", features = ["native-tls"] }
+
+# Serialização / protocolo Nostr
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Tipos e validação Nostr (eventos, filtros, assinaturas)
+nostr = "0.38"
+
+# HTTP client (registry, discovery, health checks)
+reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
+
+# Configuração
+toml = "0.8"
+
+# Logging estruturado
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+# Diretórios padrão (XDG)
+directories = "5"
+
+# Graceful shutdown / cancellation
+tokio-util = "0.7"
+
+# UUID para node IDs, session IDs
+uuid = { version = "1", features = ["v4", "serde"] }
+
+# Anyhow
+anyhow = "1"
+
+# Backoff exponencial para reconnect
+backoff = { version = "0.4", features = ["tokio"] }
+
+# future-util
+futures-util = "0.3"
+
+# Concorrência: set dedup + peer tracking
+dashmap = "6"
+
+# Timestamps para heartbeat/cursor
+chrono = { version = "0.4", features = ["serde"] }
+
+[dev-dependencies]
+tempfile = "3"
+
+[profile.release]
+strip = true
+lto = "thin"
+codegen-units = 1
