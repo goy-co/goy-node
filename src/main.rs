@@ -14,6 +14,7 @@ use tracing_subscriber::{EnvFilter, fmt};
 
 mod config;
 mod mesh;
+mod registry;
 mod relay;
 
 /// Opções CLI para o Goy Node
