@@ -696,6 +696,9 @@ mod tests {
             seeds: vec![],
             registry_url: None,
             heartbeat_secs: 30,
+            discovery_secs: 60,
+            mesh_url: None,
+            node_id: None,
         };
 
         let cancel_mesh = cancel.clone();
@@ -764,6 +767,9 @@ mod tests {
             seeds: vec![],
             registry_url: None,
             heartbeat_secs: 30,
+            discovery_secs: 60,
+            mesh_url: None,
+            node_id: None,
         };
 
         let cancel_a = cancel.clone();
@@ -780,6 +786,9 @@ mod tests {
             seeds: vec!["ws://127.0.0.1:18446".to_string()],
             registry_url: None,
             heartbeat_secs: 30,
+            discovery_secs: 60,
+            mesh_url: None,
+            node_id: None,
         };
 
         let cancel_b = cancel.clone();
@@ -869,6 +878,9 @@ mod tests {
             seeds: vec![],
             registry_url: None,
             heartbeat_secs: 30,
+            discovery_secs: 60,
+            mesh_url: None,
+            node_id: None,
         };
 
         let cancel_a = cancel.clone();
@@ -885,6 +897,9 @@ mod tests {
             seeds: vec!["ws://127.0.0.1:18450".to_string()],
             registry_url: None,
             heartbeat_secs: 30,
+            discovery_secs: 60,
+            mesh_url: None,
+            node_id: None,
         };
 
         let cancel_b = cancel.clone();
@@ -939,6 +954,9 @@ mod tests {
             seeds: vec![],
             registry_url: None,
             heartbeat_secs: 1, // timeout = 3s
+            discovery_secs: 60,
+            mesh_url: None,
+            node_id: None,
         };
 
         let cancel_a = cancel.clone();
@@ -1061,6 +1079,9 @@ mod tests {
             seeds: vec![],
             registry_url: None,
             heartbeat_secs: 30,
+            discovery_secs: 60,
+            mesh_url: None,
+            node_id: None,
         };
         let cancel_a = cancel.clone();
         tokio::spawn(async move {
@@ -1077,6 +1098,9 @@ mod tests {
             seeds: vec!["ws://127.0.0.1:18470".to_string()],
             registry_url: None,
             heartbeat_secs: 30,
+            discovery_secs: 60,
+            mesh_url: None,
+            node_id: None,
         };
 
         let c_b1 = cancel_b1.clone();
@@ -1110,6 +1134,9 @@ mod tests {
             seeds: vec!["ws://127.0.0.1:18470".to_string()],
             registry_url: None,
             heartbeat_secs: 30,
+            discovery_secs: 60,
+            mesh_url: None,
+            node_id: None,
         };
 
         let c_b2 = cancel_b2.clone();

@@ -55,10 +55,21 @@ pub struct MeshConfig {
     /// Heartbeat interval em segundos
     #[serde(default = "default_heartbeat")]
     pub heartbeat_secs: u64,
+    /// Intervalo de descoberta periódica de peers em segundos (default: 60s)
+    #[serde(default = "default_discovery")]
+    pub discovery_secs: u64,
+    /// Endereço acessível na VPN / rede para publicitar no registry (opcional override)
+    pub mesh_url: Option<String>,
+    /// ID único do nó no mesh/registry (opcional override)
+    pub node_id: Option<String>,
 }
 
 fn default_heartbeat() -> u64 {
     30
+}
+
+fn default_discovery() -> u64 {
+    60
 }
 
 impl Config {
@@ -129,6 +140,23 @@ impl Config {
                 self.mesh.heartbeat_secs = secs;
             }
         }
+
+        if let Ok(secs_raw) = std::env::var("GOY_NODE_MESH_DISCOVERY_SECS") {
+            if let Ok(secs) = secs_raw.parse::<u64>() {
+                info!("🔧 Override from env GOY_NODE_MESH_DISCOVERY_SECS: {secs}");
+                self.mesh.discovery_secs = secs;
+            }
+        }
+
+        if let Ok(url) = std::env::var("GOY_NODE_MESH_URL") {
+            info!("🔧 Override from env GOY_NODE_MESH_URL: {url}");
+            self.mesh.mesh_url = Some(url);
+        }
+
+        if let Ok(id) = std::env::var("GOY_NODE_ID") {
+            info!("🔧 Override from env GOY_NODE_ID: {id}");
+            self.mesh.node_id = Some(id);
+        }
     }
 
     /// Valida rigorosamente todos os campos da configuração.
@@ -169,6 +197,11 @@ impl Config {
             );
         }
 
+        // 5. Valida discovery_secs
+        if self.mesh.discovery_secs == 0 {
+            anyhow::bail!("Invalid mesh.discovery_secs: must be greater than 0");
+        }
+
         Ok(())
     }
 }
@@ -185,9 +218,79 @@ impl Default for Config {
                 seeds: vec![],
                 registry_url: None,
                 heartbeat_secs: default_heartbeat(),
+                discovery_secs: default_discovery(),
+                mesh_url: None,
+                node_id: None,
             },
         }
     }
+}
+
+/// Tenta detectar o endereço do nó na VPN (Tailscale) ou interface local.
+/// Se `override_url` for fornecido (config ou env var), este tem sempre prioridade.
+pub fn detect_mesh_url(listen_addr: &str, override_url: Option<&str>) -> String {
+    if let Some(url) = override_url {
+        let trimmed = url.trim();
+        if !trimmed.is_empty() {
+            info!("🌐 Mesh URL manually set: {trimmed}");
+            return trimmed.to_string();
+        }
+    }
+
+    let port = listen_addr
+        .parse::<SocketAddr>()
+        .map(|a| a.port())
+        .unwrap_or(8443);
+
+    // 1. Tentar Tailscale status --json
+    if let Ok(output) = std::process::Command::new("tailscale")
+        .args(["status", "--json"])
+        .output()
+    {
+        if output.status.success() {
+            if let Ok(json) = serde_json::from_slice::<serde_json::Value>(&output.stdout) {
+                if let Some(self_node) = json.get("Self") {
+                    if let Some(dns_name) = self_node.get("DNSName").and_then(|v| v.as_str()) {
+                        let clean_dns = dns_name.trim_end_matches('.');
+                        if !clean_dns.is_empty() {
+                            let url = format!("ws://{clean_dns}:{port}");
+                            info!("🌐 Mesh URL auto-detected via Tailscale MagicDNS: {url}");
+                            return url;
+                        }
+                    }
+                    if let Some(ips) = self_node.get("TailscaleIPs").and_then(|v| v.as_array()) {
+                        for ip in ips {
+                            if let Some(ip_str) = ip.as_str() {
+                                if ip_str.starts_with("100.") {
+                                    let url = format!("ws://{ip_str}:{port}");
+                                    info!("🌐 Mesh URL auto-detected via Tailscale IP: {url}");
+                                    return url;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // 2. Fallback: IP não-loopback da interface de rede (via UDP probe)
+    if let Ok(socket) = std::net::UdpSocket::bind("0.0.0.0:0") {
+        if socket.connect("1.1.1.1:80").is_ok() {
+            if let Ok(addr) = socket.local_addr() {
+                let ip = addr.ip();
+                if !ip.is_loopback() {
+                    let url = format!("ws://{ip}:{port}");
+                    info!("🌐 Mesh URL auto-detected via local interface IP: {url}");
+                    return url;
+                }
+            }
+        }
+    }
+
+    let fallback_url = format!("ws://127.0.0.1:{port}");
+    info!("🌐 Mesh URL auto-detected fallback: {fallback_url}");
+    fallback_url
 }
 
 #[cfg(test)]
@@ -246,12 +349,37 @@ mod tests {
     }
 
     #[test]
+    fn test_validation_fails_on_zero_discovery() {
+        let mut cfg = Config::default();
+        cfg.mesh.discovery_secs = 0;
+        let res = cfg.validate();
+        assert!(res.is_err());
+        assert!(res.unwrap_err().to_string().contains("must be greater than 0"));
+    }
+
+    #[test]
+    fn test_detect_mesh_url_override() {
+        let url = detect_mesh_url("0.0.0.0:8443", Some("ws://goy-node-custom:8443"));
+        assert_eq!(url, "ws://goy-node-custom:8443");
+    }
+
+    #[test]
+    fn test_detect_mesh_url_fallback() {
+        let url = detect_mesh_url("0.0.0.0:9443", None);
+        assert!(url.starts_with("ws://"));
+        assert!(url.ends_with(":9443"));
+    }
+
+    #[test]
     fn test_env_override_precedence() {
         unsafe {
             std::env::set_var("GOY_NODE_RELAY_URL", "ws://10.0.0.99:9999");
             std::env::set_var("GOY_NODE_MESH_LISTEN", "127.0.0.1:9443");
             std::env::set_var("GOY_NODE_MESH_SEEDS", "ws://seed1:8443, ws://seed2:8443");
             std::env::set_var("GOY_NODE_MESH_HEARTBEAT_SECS", "15");
+            std::env::set_var("GOY_NODE_MESH_DISCOVERY_SECS", "45");
+            std::env::set_var("GOY_NODE_MESH_URL", "ws://override.tailnet:8443");
+            std::env::set_var("GOY_NODE_ID", "node-override-id");
         }
 
         let mut cfg = Config::default();
@@ -261,6 +389,9 @@ mod tests {
         assert_eq!(cfg.mesh.listen, "127.0.0.1:9443");
         assert_eq!(cfg.mesh.seeds, vec!["ws://seed1:8443", "ws://seed2:8443"]);
         assert_eq!(cfg.mesh.heartbeat_secs, 15);
+        assert_eq!(cfg.mesh.discovery_secs, 45);
+        assert_eq!(cfg.mesh.mesh_url, Some("ws://override.tailnet:8443".to_string()));
+        assert_eq!(cfg.mesh.node_id, Some("node-override-id".to_string()));
         assert!(cfg.validate().is_ok());
 
         unsafe {
@@ -268,6 +399,9 @@ mod tests {
             std::env::remove_var("GOY_NODE_MESH_LISTEN");
             std::env::remove_var("GOY_NODE_MESH_SEEDS");
             std::env::remove_var("GOY_NODE_MESH_HEARTBEAT_SECS");
+            std::env::remove_var("GOY_NODE_MESH_DISCOVERY_SECS");
+            std::env::remove_var("GOY_NODE_MESH_URL");
+            std::env::remove_var("GOY_NODE_ID");
         }
     }
 }

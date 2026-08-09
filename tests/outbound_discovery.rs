@@ -19,6 +19,9 @@ async fn test_outbound_seed_reconnect_and_sync() -> anyhow::Result<()> {
         seeds: vec![],
         registry_url: None,
         heartbeat_secs: 30,
+        discovery_secs: 60,
+        mesh_url: None,
+        node_id: None,
     };
 
     let cancel_a = cancel.clone();
@@ -35,6 +38,9 @@ async fn test_outbound_seed_reconnect_and_sync() -> anyhow::Result<()> {
         seeds: vec!["ws://127.0.0.1:19446".to_string()],
         registry_url: None,
         heartbeat_secs: 30,
+        discovery_secs: 60,
+        mesh_url: None,
+        node_id: None,
     };
 
     let cancel_b = cancel.clone();
@@ -96,18 +102,27 @@ async fn test_mesh_deduplication_triangle_loop() -> anyhow::Result<()> {
         seeds: vec![],
         registry_url: None,
         heartbeat_secs: 30,
+        discovery_secs: 60,
+        mesh_url: None,
+        node_id: None,
     };
     let cfg_b = MeshConfig {
         listen: "127.0.0.1:19452".to_string(),
         seeds: vec!["ws://127.0.0.1:19451".to_string()],
         registry_url: None,
         heartbeat_secs: 30,
+        discovery_secs: 60,
+        mesh_url: None,
+        node_id: None,
     };
     let cfg_c = MeshConfig {
         listen: "127.0.0.1:19453".to_string(),
         seeds: vec!["ws://127.0.0.1:19451".to_string(), "ws://127.0.0.1:19452".to_string()],
         registry_url: None,
         heartbeat_secs: 30,
+        discovery_secs: 60,
+        mesh_url: None,
+        node_id: None,
     };
 
     let c_a = cancel.clone();
