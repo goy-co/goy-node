@@ -31,6 +31,8 @@ pub struct MeshState {
     pub seen_ids: DashSet<String>,
     /// Conjunto de event IDs que foram explicitamente deletados (NIP-09).
     pub deleted_ids: DashSet<String>,
+    /// Eventos com tag `expiration` (NIP-40): event_id -> expiration timestamp Unix.
+    pub expiring_events: DashMap<String, u64>,
     /// Último timestamp (created_at) visto por peer para backfill incremental.
     pub peer_cursors: DashMap<String, u64>,
     /// Registro da versão mais recente de eventos substituíveis (replacement_key -> (created_at, event_id)).
@@ -226,6 +228,69 @@ pub fn process_deletion_event(state: &MeshState, raw_event: &str) -> bool {
     true
 }
 
+/// Verifica se um evento raw está expirado (NIP-40).
+/// - Se o evento tiver tag `expiration` e o timestamp já tiver passado: descarta (retorna `false`).
+/// - Se o evento tiver `expiration` futura: regista em `state.expiring_events` e aceita (retorna `true`).
+/// - Se não tiver tag `expiration`: aceita normalmente (retorna `true`).
+pub fn process_expiry_check(state: &MeshState, raw_event: &str) -> bool {
+    let Some(event_obj) = crate::event_types::extract_event_object(raw_event) else {
+        return true;
+    };
+
+    let Some(exp_ts) = crate::event_types::extract_expiration(&event_obj) else {
+        return true; // Sem tag expiration — aceitar
+    };
+
+    let now_ts = chrono::Utc::now().timestamp() as u64;
+    if exp_ts <= now_ts {
+        tracing::debug!("⏰ Discarding expired event (expiration={exp_ts}, now={now_ts})");
+        return false;
+    }
+
+    // Evento com expiração futura — registar para limpeza periódica
+    let event_id = event_obj.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    if !event_id.is_empty() {
+        state.expiring_events.insert(event_id, exp_ts);
+    }
+    true
+}
+
+/// Task background que remove periodicamente os eventos expirados (NIP-40).
+/// Corre a cada `interval_secs` segundos até cancelação.
+pub async fn run_expiry_cleanup_task(
+    state: Arc<MeshState>,
+    interval_secs: u64,
+    cancel: CancellationToken,
+) {
+    let mut interval = tokio::time::interval(Duration::from_secs(interval_secs));
+    loop {
+        tokio::select! {
+            _ = cancel.cancelled() => break,
+            _ = interval.tick() => {
+                let now_ts = chrono::Utc::now().timestamp() as u64;
+                let mut expired_count = 0u64;
+
+                state.expiring_events.retain(|event_id, exp_ts| {
+                    if *exp_ts <= now_ts {
+                        // Remover de seen_ids para libertar memória
+                        state.seen_ids.remove(event_id.as_str());
+                        // Remover de latest_replaceable se era substituível
+                        state.latest_replaceable.retain(|_, v| v.1 != *event_id);
+                        expired_count += 1;
+                        false // remove from expiring_events
+                    } else {
+                        true // keep
+                    }
+                });
+
+                if expired_count > 0 {
+                    info!("🧹 Expired {expired_count} events (NIP-40 cleanup)");
+                }
+            }
+        }
+    }
+}
+
 /// Carrega seen_ids e peer_cursors do disco.
 fn load_state(data_dir: Option<&Path>) -> (DashSet<String>, DashSet<String>, DashMap<String, u64>) {
     let seen_ids = DashSet::new();
@@ -412,6 +477,7 @@ pub async fn run(
     let state = Arc::new(MeshState {
         seen_ids,
         deleted_ids,
+        expiring_events: DashMap::new(),
         peer_cursors,
         latest_replaceable: DashMap::new(),
         relay_tx: relay_publish_tx,
@@ -446,6 +512,10 @@ pub async fn run(
                             if let Some(id) = extract_event_id(&event.raw) {
                                 // Processar deleções (NIP-09) antes de qualquer outra coisa
                                 process_deletion_event(&state_clone, &event.raw);
+                                // Verificar expiração (NIP-40)
+                                if !process_expiry_check(&state_clone, &event.raw) {
+                                    continue;
+                                }
                                 // Verificar substituição e deduplicação
                                 if process_replaceable_event(&state_clone, &event.raw) {
                                     if state_clone.seen_ids.insert(id.clone()) {
@@ -481,6 +551,14 @@ pub async fn run(
         );
     }
 
+    // ── Task: limpeza periódica de eventos expirados (NIP-40) ─────────
+    {
+        let state_exp = state.clone();
+        let cancel_exp = cancel.clone();
+        tokio::spawn(async move {
+            run_expiry_cleanup_task(state_exp, 60, cancel_exp).await;
+        });
+    }
     // ── Registry Central & Dynamic Peer Discovery ──────────────────────
     if let Some(ref registry_url) = cfg.registry_url {
         let registry_client = RegistryClient::new(registry_url.clone());
@@ -834,6 +912,10 @@ async fn handle_peer_stream<Si, St>(
                                 }
                                 // Processar deleções (NIP-09) antes de qualquer outra coisa
                                 process_deletion_event(&state, &text);
+                                // Verificar expiração (NIP-40)
+                                if !process_expiry_check(&state, &text) {
+                                    continue;
+                                }
                                 // Verificar substituição e deduplicação
                                 if process_replaceable_event(&state, &text) {
                                     if state.seen_ids.insert(id.clone()) {
@@ -1400,6 +1482,7 @@ mod tests {
         let state = MeshState {
             seen_ids: DashSet::new(),
             deleted_ids: DashSet::new(),
+            expiring_events: DashMap::new(),
             peer_cursors: DashMap::new(),
             latest_replaceable: DashMap::new(),
             relay_tx: mpsc::channel(1).0,
@@ -1594,6 +1677,7 @@ mod tests {
         let state = MeshState {
             seen_ids: DashSet::new(),
             deleted_ids: DashSet::new(),
+            expiring_events: DashMap::new(),
             peer_cursors: DashMap::new(),
             latest_replaceable: DashMap::new(),
             relay_tx: mpsc::channel(1).0,
@@ -1621,6 +1705,7 @@ mod tests {
         let state = MeshState {
             seen_ids: DashSet::new(),
             deleted_ids: DashSet::new(),
+            expiring_events: DashMap::new(),
             peer_cursors: DashMap::new(),
             latest_replaceable: DashMap::new(),
             relay_tx: mpsc::channel(1).0,
@@ -1647,6 +1732,7 @@ mod tests {
         let state = MeshState {
             seen_ids: DashSet::new(),
             deleted_ids: DashSet::new(),
+            expiring_events: DashMap::new(),
             peer_cursors: DashMap::new(),
             latest_replaceable: DashMap::new(),
             relay_tx: mpsc::channel(1).0,
@@ -1674,6 +1760,7 @@ mod tests {
         MeshState {
             seen_ids: DashSet::new(),
             deleted_ids: DashSet::new(),
+            expiring_events: DashMap::new(),
             peer_cursors: DashMap::new(),
             latest_replaceable: DashMap::new(),
             relay_tx: mpsc::channel(1).0,
@@ -1766,6 +1853,116 @@ mod tests {
         let backfill_evt = r#"["EVENT","sub_bf",{"id":"historical_evt_99","pubkey":"pub_carol","kind":1,"created_at":1000,"content":"Hello"}]"#;
         let accepted = process_replaceable_event(&state, backfill_evt);
         assert!(!accepted, "Event deleted before backfill arrival must be discarded");
+    }
+
+    // ── NIP-40: Expirable Events ─────────────────────────────────────────
+
+    #[test]
+    fn test_process_expiry_check_already_expired() {
+        let state = make_test_state();
+        // expiration in the deep past (Unix epoch + 1)
+        let raw = r#"["EVENT",{"id":"exp_evt_1","pubkey":"pub_alice","kind":1,"created_at":1000,"tags":[["expiration","1"]],"content":"old"}]"#;
+        let accepted = process_expiry_check(&state, raw);
+        assert!(!accepted, "Already-expired event must be rejected");
+        assert!(!state.expiring_events.contains_key("exp_evt_1"), "Expired event must not be registered in expiring_events");
+    }
+
+    #[test]
+    fn test_process_expiry_check_future_expiration() {
+        let state = make_test_state();
+        // expiration far in the future
+        let raw = r#"["EVENT",{"id":"exp_evt_2","pubkey":"pub_alice","kind":1,"created_at":9000,"tags":[["expiration","9999999999"]],"content":"future"}]"#;
+        let accepted = process_expiry_check(&state, raw);
+        assert!(accepted, "Event with future expiration must be accepted");
+        assert!(state.expiring_events.contains_key("exp_evt_2"), "Future expiration must be registered in expiring_events");
+        assert_eq!(state.expiring_events.get("exp_evt_2").map(|v| *v), Some(9999999999u64));
+    }
+
+    #[test]
+    fn test_process_expiry_check_no_expiration_tag() {
+        let state = make_test_state();
+        let raw = r#"["EVENT",{"id":"no_exp_evt","pubkey":"pub_alice","kind":1,"created_at":1000,"content":"no expiry"}]"#;
+        let accepted = process_expiry_check(&state, raw);
+        assert!(accepted, "Event without expiration tag must always be accepted");
+        assert!(!state.expiring_events.contains_key("no_exp_evt"), "Event without expiration must not be tracked");
+    }
+
+    #[tokio::test]
+    async fn test_expiry_cleanup_task_removes_expired_events() {
+        let state = Arc::new(make_test_state());
+
+        let future_exp = 9_999_999_999u64;
+        let past_exp = 1u64; // already expired
+
+        state.seen_ids.insert("evt_future".to_string());
+        state.expiring_events.insert("evt_future".to_string(), future_exp);
+
+        state.seen_ids.insert("evt_past".to_string());
+        state.expiring_events.insert("evt_past".to_string(), past_exp);
+
+        // Run cleanup with a very short interval; just tick manually by calling the retain logic
+        // We simulate by calling the cleanup inline with the current time
+        let now_ts = chrono::Utc::now().timestamp() as u64;
+        let mut expired_count = 0u64;
+        state.expiring_events.retain(|event_id, exp_ts| {
+            if *exp_ts <= now_ts {
+                state.seen_ids.remove(event_id.as_str());
+                state.latest_replaceable.retain(|_, v| v.1 != *event_id);
+                expired_count += 1;
+                false
+            } else {
+                true
+            }
+        });
+
+        assert_eq!(expired_count, 1, "Only one event should be expired");
+        assert!(!state.expiring_events.contains_key("evt_past"), "Past event must be removed from expiring_events");
+        assert!(!state.seen_ids.contains("evt_past"), "Past event must be removed from seen_ids");
+        assert!(state.expiring_events.contains_key("evt_future"), "Future event must remain in expiring_events");
+        assert!(state.seen_ids.contains("evt_future"), "Future event must remain in seen_ids");
+    }
+
+    #[tokio::test]
+    async fn test_expiry_cleanup_removes_from_latest_replaceable() {
+        let state = Arc::new(make_test_state());
+
+        // Register a replaceable event that will expire
+        state.latest_replaceable.insert("pub_alice:0".to_string(), (1000, "expiring_profile".to_string()));
+        state.expiring_events.insert("expiring_profile".to_string(), 1u64); // already expired
+
+        // Simulate cleanup
+        let now_ts = chrono::Utc::now().timestamp() as u64;
+        state.expiring_events.retain(|event_id, exp_ts| {
+            if *exp_ts <= now_ts {
+                state.seen_ids.remove(event_id.as_str());
+                state.latest_replaceable.retain(|_, v| v.1 != *event_id);
+                false
+            } else {
+                true
+            }
+        });
+
+        assert!(!state.latest_replaceable.contains_key("pub_alice:0"),
+            "Expired replaceable event must be removed from latest_replaceable");
+    }
+
+    #[test]
+    fn test_process_expiry_check_invalid_expiration_tag() {
+        let state = make_test_state();
+        // Invalid expiration value — should be treated as no expiration
+        let raw = r#"["EVENT",{"id":"bad_exp_evt","pubkey":"pub_alice","kind":1,"created_at":1000,"tags":[["expiration","not-a-ts"]],"content":"bad"}]"#;
+        let accepted = process_expiry_check(&state, raw);
+        assert!(accepted, "Event with invalid expiration tag must be accepted (treated as no expiration)");
+        assert!(!state.expiring_events.contains_key("bad_exp_evt"));
+    }
+
+    #[test]
+    fn test_expired_backfill_event_discarded() {
+        let state = make_test_state();
+        // Backfill event with expiration already in the past
+        let raw = r#"["EVENT","sub_bf",{"id":"old_exp","pubkey":"pub_bob","kind":1,"created_at":100,"tags":[["expiration","2"]],"content":"stale"}]"#;
+        let accepted = process_expiry_check(&state, raw);
+        assert!(!accepted, "Expired event arriving via backfill must be discarded");
     }
 }
 

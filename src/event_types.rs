@@ -128,6 +128,30 @@ pub fn extract_event_object(raw: &str) -> Option<Value> {
     }
 }
 
+/// Extrai o valor da tag `expiration` de um evento Nostr (NIP-40).
+/// Retorna `Some(timestamp_unix)` se a tag existir e o valor for um inteiro válido,
+/// ou `None` se a tag não existir ou o valor não for parsável.
+pub fn extract_expiration(event: &Value) -> Option<u64> {
+    let tags = event.get("tags")?.as_array()?;
+    for tag in tags {
+        let tag_arr = tag.as_array()?;
+        if tag_arr.len() >= 2 && tag_arr[0].as_str() == Some("expiration") {
+            let raw = tag_arr[1].as_str()?;
+            return raw.parse::<u64>().ok();
+        }
+    }
+    None
+}
+
+/// Verifica se um evento está expirado em relação ao instante `now_ts` (timestamp Unix).
+/// Retorna `true` se o evento tem tag `expiration` e o valor é <= `now_ts`.
+pub fn is_expired(event: &Value, now_ts: u64) -> bool {
+    match extract_expiration(event) {
+        Some(exp) => exp <= now_ts,
+        None => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -253,5 +277,40 @@ mod tests {
             "content": "hello"
         });
         assert_eq!(replacement_key(&text_note), None);
+    }
+
+    #[test]
+    fn test_extract_expiration() {
+        let event_with_exp = json!({
+            "kind": 1,
+            "tags": [["t", "nostr"], ["expiration", "9999999999"]]
+        });
+        assert_eq!(extract_expiration(&event_with_exp), Some(9999999999u64));
+
+        let event_without_exp = json!({"kind": 1, "tags": [["t", "nostr"]]});
+        assert_eq!(extract_expiration(&event_without_exp), None);
+
+        let event_invalid_exp = json!({"kind": 1, "tags": [["expiration", "not-a-number"]]});
+        assert_eq!(extract_expiration(&event_invalid_exp), None);
+
+        let event_no_tags = json!({"kind": 1});
+        assert_eq!(extract_expiration(&event_no_tags), None);
+    }
+
+    #[test]
+    fn test_is_expired() {
+        let now = 1_700_000_000u64;
+
+        let expired_event = json!({"kind": 1, "tags": [["expiration", "1699999999"]]});
+        assert!(is_expired(&expired_event, now), "Event with past expiration must be expired");
+
+        let at_boundary = json!({"kind": 1, "tags": [["expiration", "1700000000"]]});
+        assert!(is_expired(&at_boundary, now), "Event with expiration == now must be considered expired");
+
+        let future_event = json!({"kind": 1, "tags": [["expiration", "1700000001"]]});
+        assert!(!is_expired(&future_event, now), "Event with future expiration must NOT be expired");
+
+        let no_expiry = json!({"kind": 1, "tags": []});
+        assert!(!is_expired(&no_expiry, now), "Event without expiration tag must never be expired");
     }
 }
