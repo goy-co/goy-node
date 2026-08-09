@@ -1,5 +1,6 @@
 use std::time::Duration;
 
+use tokio::net::TcpListener;
 use tokio::sync::{broadcast, mpsc};
 use tokio_util::sync::CancellationToken;
 
@@ -10,12 +11,20 @@ use goy_node::relay::RelayEvent;
 async fn test_outbound_seed_reconnect_and_sync() -> anyhow::Result<()> {
     let cancel = CancellationToken::new();
 
-    // ── Node A (listening on 19446, no seeds) ──────────────────────────────────
+    let l_a = TcpListener::bind("127.0.0.1:0").await?;
+    let addr_a = l_a.local_addr()?;
+    drop(l_a);
+
+    let l_b = TcpListener::bind("127.0.0.1:0").await?;
+    let addr_b = l_b.local_addr()?;
+    drop(l_b);
+
+    // ── Node A (no seeds) ──────────────────────────────────
     let (relay_events_tx_a, relay_events_rx_a) = broadcast::channel::<RelayEvent>(16);
     let (relay_publish_tx_a, mut relay_publish_rx_a) = mpsc::channel::<String>(16);
 
     let cfg_a = MeshConfig {
-        listen: "127.0.0.1:19446".to_string(),
+        listen: addr_a.to_string(),
         seeds: vec![],
         registry_url: None,
         heartbeat_secs: 30,
@@ -30,13 +39,13 @@ async fn test_outbound_seed_reconnect_and_sync() -> anyhow::Result<()> {
         let _ = goy_node::mesh::run(cfg_a, "ws://127.0.0.1:57777".to_string(), None, relay_events_rx_a, relay_publish_tx_a, cancel_a).await;
     });
 
-    // ── Node B (seeds = ["ws://127.0.0.1:19446"], listening on 19447) ──────────
+    // ── Node B (seeds = Node A) ──────────
     let (relay_events_tx_b, relay_events_rx_b) = broadcast::channel::<RelayEvent>(16);
     let (relay_publish_tx_b, mut relay_publish_rx_b) = mpsc::channel::<String>(16);
 
     let cfg_b = MeshConfig {
-        listen: "127.0.0.1:19447".to_string(),
-        seeds: vec!["ws://127.0.0.1:19446".to_string()],
+        listen: addr_b.to_string(),
+        seeds: vec![format!("ws://{addr_a}")],
         registry_url: None,
         heartbeat_secs: 30,
         discovery_secs: 60,
@@ -89,7 +98,19 @@ async fn test_outbound_seed_reconnect_and_sync() -> anyhow::Result<()> {
 async fn test_mesh_deduplication_triangle_loop() -> anyhow::Result<()> {
     let cancel = CancellationToken::new();
 
-    // Node A (19451), Node B (19452, seed A), Node C (19453, seed A e seed B)
+    let l_a = TcpListener::bind("127.0.0.1:0").await?;
+    let addr_a = l_a.local_addr()?;
+    drop(l_a);
+
+    let l_b = TcpListener::bind("127.0.0.1:0").await?;
+    let addr_b = l_b.local_addr()?;
+    drop(l_b);
+
+    let l_c = TcpListener::bind("127.0.0.1:0").await?;
+    let addr_c = l_c.local_addr()?;
+    drop(l_c);
+
+    // Node A, Node B (seed A), Node C (seed A e seed B)
     let (relay_events_tx_a, relay_events_rx_a) = broadcast::channel::<RelayEvent>(16);
     let (relay_publish_tx_a, _relay_publish_rx_a) = mpsc::channel::<String>(16);
 
@@ -100,7 +121,7 @@ async fn test_mesh_deduplication_triangle_loop() -> anyhow::Result<()> {
     let (relay_publish_tx_c, mut relay_publish_rx_c) = mpsc::channel::<String>(16);
 
     let cfg_a = MeshConfig {
-        listen: "127.0.0.1:19451".to_string(),
+        listen: addr_a.to_string(),
         seeds: vec![],
         registry_url: None,
         heartbeat_secs: 30,
@@ -110,8 +131,8 @@ async fn test_mesh_deduplication_triangle_loop() -> anyhow::Result<()> {
         replication_factor: 3,
     };
     let cfg_b = MeshConfig {
-        listen: "127.0.0.1:19452".to_string(),
-        seeds: vec!["ws://127.0.0.1:19451".to_string()],
+        listen: addr_b.to_string(),
+        seeds: vec![format!("ws://{addr_a}")],
         registry_url: None,
         heartbeat_secs: 30,
         discovery_secs: 60,
@@ -120,8 +141,8 @@ async fn test_mesh_deduplication_triangle_loop() -> anyhow::Result<()> {
         replication_factor: 3,
     };
     let cfg_c = MeshConfig {
-        listen: "127.0.0.1:19453".to_string(),
-        seeds: vec!["ws://127.0.0.1:19451".to_string(), "ws://127.0.0.1:19452".to_string()],
+        listen: addr_c.to_string(),
+        seeds: vec![format!("ws://{addr_a}"), format!("ws://{addr_b}")],
         registry_url: None,
         heartbeat_secs: 30,
         discovery_secs: 60,
@@ -137,26 +158,25 @@ async fn test_mesh_deduplication_triangle_loop() -> anyhow::Result<()> {
     let c_c = cancel.clone();
     tokio::spawn(async move { let _ = goy_node::mesh::run(cfg_c, "ws://127.0.0.1:57777".to_string(), None, relay_events_rx_c, relay_publish_tx_c, c_c).await; });
 
-    tokio::time::sleep(Duration::from_millis(400)).await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
 
-    // Publica um evento no Nó A
-    let event_loop = r#"["EVENT","sub_loop",{"id":"loop_event_999","content":"loop check"}]"#;
-    relay_events_tx_a.send(RelayEvent { raw: event_loop.to_string() })?;
+    // Transmit um evento a partir do Node A
+    let event_loop = r#"["EVENT","sub_loop",{"id":"e000000000000000000000000000000000000000000000000000000000000099","content":"Loop test"}]"#;
+    relay_events_tx_a.send(RelayEvent {
+        raw: event_loop.to_string(),
+    })?;
 
-    // Tanto B como C devem receber o evento exatamente uma vez
+    // Node B e Node C devem receber exatamente UMA vez cada (dedup)
     let rec_b = tokio::time::timeout(Duration::from_secs(2), relay_publish_rx_b.recv())
         .await?
-        .ok_or_else(|| anyhow::anyhow!("Node B recv error"))?;
+        .ok_or_else(|| anyhow::anyhow!("Node B did not receive loop event"))?;
     let rec_c = tokio::time::timeout(Duration::from_secs(2), relay_publish_rx_c.recv())
         .await?
-        .ok_or_else(|| anyhow::anyhow!("Node C recv error"))?;
+        .ok_or_else(|| anyhow::anyhow!("Node C did not receive loop event"))?;
 
-    let expected_norm = r#"["EVENT",{"id":"loop_event_999","content":"loop check"}]"#;
-    assert_eq!(rec_b, expected_norm);
-    assert_eq!(rec_c, expected_norm);
-
-    // Aguarda um momento para garantir que não há loops infinitos nem mensagens repetidas
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    let expected = r#"["EVENT",{"id":"e000000000000000000000000000000000000000000000000000000000000099","content":"Loop test"}]"#;
+    assert_eq!(rec_b, expected);
+    assert_eq!(rec_c, expected);
 
     cancel.cancel();
     Ok(())

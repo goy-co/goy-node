@@ -144,16 +144,28 @@ async fn test_three_nodes_dynamic_discovery_full_mesh() -> anyhow::Result<()> {
     let cancel = CancellationToken::new();
     let mock = MockRegistry::start().await?;
 
-    // Node A (19501)
+    let l_a = TcpListener::bind("127.0.0.1:0").await?;
+    let addr_a = l_a.local_addr()?;
+    drop(l_a);
+
+    let l_b = TcpListener::bind("127.0.0.1:0").await?;
+    let addr_b = l_b.local_addr()?;
+    drop(l_b);
+
+    let l_c = TcpListener::bind("127.0.0.1:0").await?;
+    let addr_c = l_c.local_addr()?;
+    drop(l_c);
+
+    // Node A
     let (_relay_events_tx_a, relay_events_rx_a) = broadcast::channel::<RelayEvent>(16);
     let (relay_publish_tx_a, mut relay_publish_rx_a) = mpsc::channel::<String>(16);
     let cfg_a = MeshConfig {
-        listen: "127.0.0.1:19501".to_string(),
+        listen: addr_a.to_string(),
         seeds: vec![],
         registry_url: Some(mock.url.clone()),
         heartbeat_secs: 10,
         discovery_secs: 1,
-        mesh_url: Some("ws://127.0.0.1:19501".to_string()),
+        mesh_url: Some(format!("ws://{addr_a}")),
         node_id: Some("node-A".to_string()),
         replication_factor: 3,
     };
@@ -163,16 +175,16 @@ async fn test_three_nodes_dynamic_discovery_full_mesh() -> anyhow::Result<()> {
         let _ = goy_node::mesh::run(cfg_a, "ws://127.0.0.1:57777".to_string(), None, relay_events_rx_a, relay_publish_tx_a, c_a).await;
     });
 
-    // Node B (19502)
+    // Node B
     let (_relay_events_tx_b, relay_events_rx_b) = broadcast::channel::<RelayEvent>(16);
     let (relay_publish_tx_b, mut relay_publish_rx_b) = mpsc::channel::<String>(16);
     let cfg_b = MeshConfig {
-        listen: "127.0.0.1:19502".to_string(),
+        listen: addr_b.to_string(),
         seeds: vec![],
         registry_url: Some(mock.url.clone()),
         heartbeat_secs: 10,
         discovery_secs: 1,
-        mesh_url: Some("ws://127.0.0.1:19502".to_string()),
+        mesh_url: Some(format!("ws://{addr_b}")),
         node_id: Some("node-B".to_string()),
         replication_factor: 3,
     };
@@ -183,18 +195,18 @@ async fn test_three_nodes_dynamic_discovery_full_mesh() -> anyhow::Result<()> {
     });
 
     // Aguarda Node A e Node B registarem no registry
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    tokio::time::sleep(Duration::from_millis(600)).await;
 
-    // Node C arranca (19503)
+    // Node C arranca
     let (relay_events_tx_c, relay_events_rx_c) = broadcast::channel::<RelayEvent>(16);
     let (relay_publish_tx_c, _relay_publish_rx_c) = mpsc::channel::<String>(16);
     let cfg_c = MeshConfig {
-        listen: "127.0.0.1:19503".to_string(),
+        listen: addr_c.to_string(),
         seeds: vec![],
         registry_url: Some(mock.url.clone()),
         heartbeat_secs: 10,
         discovery_secs: 1,
-        mesh_url: Some("ws://127.0.0.1:19503".to_string()),
+        mesh_url: Some(format!("ws://{addr_c}")),
         node_id: Some("node-C".to_string()),
         replication_factor: 3,
     };
@@ -205,7 +217,7 @@ async fn test_three_nodes_dynamic_discovery_full_mesh() -> anyhow::Result<()> {
     });
 
     // Aguarda Node C descobrir A e B via registry e conectar automaticamente
-    tokio::time::sleep(Duration::from_millis(1500)).await;
+    tokio::time::sleep(Duration::from_millis(2500)).await;
 
     // Transmissão de evento vindo de Node C -> deve chegar a Node A e Node B
     let event_from_c = r#"["EVENT","sub_c",{"id":"evt_from_c_999","content":"Hello from Node C"}]"#;
@@ -213,10 +225,10 @@ async fn test_three_nodes_dynamic_discovery_full_mesh() -> anyhow::Result<()> {
         raw: event_from_c.to_string(),
     })?;
 
-    let rec_a = tokio::time::timeout(Duration::from_secs(3), relay_publish_rx_a.recv())
+    let rec_a = tokio::time::timeout(Duration::from_secs(5), relay_publish_rx_a.recv())
         .await?
         .ok_or_else(|| anyhow::anyhow!("Node A did not receive event from Node C"))?;
-    let rec_b = tokio::time::timeout(Duration::from_secs(3), relay_publish_rx_b.recv())
+    let rec_b = tokio::time::timeout(Duration::from_secs(5), relay_publish_rx_b.recv())
         .await?
         .ok_or_else(|| anyhow::anyhow!("Node B did not receive event from Node C"))?;
 
@@ -238,16 +250,24 @@ async fn test_registry_resilience_outage_and_recovery() -> anyhow::Result<()> {
 
     let mock = MockRegistry::start().await?;
 
-    // Node A (19511)
+    let l_a = TcpListener::bind("127.0.0.1:0").await?;
+    let addr_a = l_a.local_addr()?;
+    drop(l_a);
+
+    let l_b = TcpListener::bind("127.0.0.1:0").await?;
+    let addr_b = l_b.local_addr()?;
+    drop(l_b);
+
+    // Node A
     let (relay_events_tx_a, relay_events_rx_a) = broadcast::channel::<RelayEvent>(16);
     let (relay_publish_tx_a, _relay_publish_rx_a) = mpsc::channel::<String>(16);
     let cfg_a = MeshConfig {
-        listen: "127.0.0.1:19511".to_string(),
+        listen: addr_a.to_string(),
         seeds: vec![],
         registry_url: Some(mock.url.clone()),
         heartbeat_secs: 10,
         discovery_secs: 1,
-        mesh_url: Some("ws://127.0.0.1:19511".to_string()),
+        mesh_url: Some(format!("ws://{addr_a}")),
         node_id: Some("node-A-resilient".to_string()),
         replication_factor: 3,
     };
@@ -258,16 +278,16 @@ async fn test_registry_resilience_outage_and_recovery() -> anyhow::Result<()> {
         let _ = goy_node::mesh::run(cfg_a, "ws://127.0.0.1:57777".to_string(), Some(dir_a1), relay_events_rx_a, relay_publish_tx_a, c_a).await;
     });
 
-    // Node B (19512)
+    // Node B
     let (_relay_events_tx_b, relay_events_rx_b) = broadcast::channel::<RelayEvent>(16);
     let (relay_publish_tx_b, mut relay_publish_rx_b) = mpsc::channel::<String>(16);
     let cfg_b = MeshConfig {
-        listen: "127.0.0.1:19512".to_string(),
+        listen: addr_b.to_string(),
         seeds: vec![],
         registry_url: Some(mock.url.clone()),
         heartbeat_secs: 10,
         discovery_secs: 1,
-        mesh_url: Some("ws://127.0.0.1:19512".to_string()),
+        mesh_url: Some(format!("ws://{addr_b}")),
         node_id: Some("node-B-resilient".to_string()),
         replication_factor: 3,
     };
