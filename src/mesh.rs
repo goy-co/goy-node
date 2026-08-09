@@ -698,8 +698,6 @@ async fn handle_peer_stream<Si, St>(
                                         let ok_msg = format!(r#"["OK","{}",true,""]"#, id);
                                         let _ = ctrl_tx.send(Message::Text(ok_msg.into())).await;
                                     }
-                                    // Replicar o evento para os N-1 peers selecionados (excluindo a origem)
-                                    replicate_event(&state, &id, &text, Some(&peer_id));
                                 } else {
                                     tracing::debug!("🔁 Event {id} from peer {peer_id} already seen (dedup), skipping relay publish");
                                 }
