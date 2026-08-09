@@ -16,7 +16,7 @@ use backoff::ExponentialBackoffBuilder;
 use dashmap::{DashMap, DashSet};
 use futures_util::{Sink, SinkExt, Stream, StreamExt};
 use tokio::net::TcpListener;
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::{broadcast, mpsc, Mutex};
 use tokio_tungstenite::tungstenite::Message;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
@@ -43,12 +43,22 @@ pub struct MeshState {
     pub connected_peers: DashSet<String>,
     /// Canais de controle dos peers conectados para mensagens direcionadas.
     pub peer_channels: DashMap<String, mpsc::Sender<Message>>,
+    /// Limites e rate limiters por peer (token buckets).
+    pub rate_limiters: DashMap<String, Arc<Mutex<crate::rate_limiter::PeerRateLimiter>>>,
     /// Fator de replicação N-of-M.
     pub replication_factor: u32,
+    /// Configurações de rate limit e limites de mensagem.
+    pub max_events_per_sec: u32,
+    pub max_bytes_per_sec: u64,
+    pub max_msg_size: usize,
     /// Contador de eventos armazenados no nó local.
     pub events_stored: AtomicU64,
     /// Contador de eventos replicados para peers.
     pub events_replicated: AtomicU64,
+    /// Métricas de rate limiting.
+    pub events_rate_limited: AtomicU64,
+    pub bytes_rate_limited: AtomicU64,
+    pub messages_oversized: AtomicU64,
     /// WebSocket URL do relay local para consultas de backfill.
     pub relay_url: String,
     /// Diretório para persistência de estado em disco (opcional).
@@ -286,6 +296,9 @@ pub async fn run_expiry_cleanup_task(
                 if expired_count > 0 {
                     info!("🧹 Expired {expired_count} events (NIP-40 cleanup)");
                 }
+
+                // Limpeza de rate limiters de peers desconectados
+                state.rate_limiters.retain(|peer_id, _| state.connected_peers.contains(peer_id));
             }
         }
     }
@@ -428,6 +441,7 @@ impl Drop for PeerGuard {
     fn drop(&mut self) {
         self.state.connected_peers.remove(&self.peer_id);
         self.state.peer_channels.remove(&self.peer_id);
+        self.state.rate_limiters.remove(&self.peer_id);
     }
 }
 
@@ -483,9 +497,16 @@ pub async fn run(
         relay_tx: relay_publish_tx,
         connected_peers: DashSet::new(),
         peer_channels: DashMap::new(),
+        rate_limiters: DashMap::new(),
         replication_factor: cfg.replication_factor,
+        max_events_per_sec: cfg.max_events_per_second_per_peer,
+        max_bytes_per_sec: cfg.max_bytes_per_second_per_peer,
+        max_msg_size: cfg.max_message_size,
         events_stored: AtomicU64::new(0),
         events_replicated: AtomicU64::new(0),
+        events_rate_limited: AtomicU64::new(0),
+        bytes_rate_limited: AtomicU64::new(0),
+        messages_oversized: AtomicU64::new(0),
         relay_url,
         data_dir: data_dir.clone(),
     });
@@ -698,10 +719,13 @@ pub async fn run(
                 _ = interval.tick() => {
                     let stored = state_metrics.events_stored.load(Ordering::Relaxed);
                     let replicated = state_metrics.events_replicated.load(Ordering::Relaxed);
+                    let rate_limited_events = state_metrics.events_rate_limited.load(Ordering::Relaxed);
+                    let rate_limited_bytes = state_metrics.bytes_rate_limited.load(Ordering::Relaxed);
+                    let oversized = state_metrics.messages_oversized.load(Ordering::Relaxed);
                     let active_peers = state_metrics.peer_channels.len();
                     info!(
-                        "📊 Replication: {} events stored locally, {} replicated, replication_factor={}, active_peers={}",
-                        stored, replicated, state_metrics.replication_factor, active_peers
+                        "📊 Replication: {} stored, {} replicated, RF={} | Rate limiting: {} events rejected, {} bytes rejected, {} oversized | active_peers={}",
+                        stored, replicated, state_metrics.replication_factor, rate_limited_events, rate_limited_bytes, oversized, active_peers
                     );
                     save_state(&state_metrics);
                 }
@@ -892,6 +916,53 @@ async fn handle_peer_stream<Si, St>(
                         break;
                     }
                     Ok(Some(Ok(Message::Text(text)))) => {
+                        let msg_bytes = text.len();
+
+                        // 1. Verificação de tamanho máximo de mensagem (antes de qualquer parsing)
+                        if msg_bytes > state.max_msg_size {
+                            state.messages_oversized.fetch_add(1, Ordering::Relaxed);
+                            warn!(
+                                "⚠️ Oversized message from peer {peer_id}: {msg_bytes} bytes > max {}",
+                                state.max_msg_size
+                            );
+                            continue;
+                        }
+
+                        // 2. Token Bucket Rate Limiting por peer
+                        let limiter_arc = state
+                            .rate_limiters
+                            .entry(peer_id.clone())
+                            .or_insert_with(|| {
+                                Arc::new(Mutex::new(
+                                    crate::rate_limiter::PeerRateLimiter::new(
+                                        state.max_events_per_sec,
+                                        state.max_bytes_per_sec,
+                                    ),
+                                ))
+                            })
+                            .clone();
+
+                        {
+                            let mut limiter = limiter_arc.lock().await;
+                            if let Err(reason) = limiter.try_consume(msg_bytes) {
+                                match reason {
+                                    crate::rate_limiter::RateLimitReason::EventsExhausted => {
+                                        state.events_rate_limited.fetch_add(1, Ordering::Relaxed);
+                                    }
+                                    crate::rate_limiter::RateLimitReason::BytesExhausted => {
+                                        state.bytes_rate_limited.fetch_add(1, Ordering::Relaxed);
+                                    }
+                                }
+                                if !limiter.warned {
+                                    limiter.warned = true;
+                                    warn!("⚠️ Peer {peer_id} rate limited: {reason} ({msg_bytes} bytes)");
+                                } else {
+                                    tracing::debug!("⚠️ Peer {peer_id} rate limited: {reason} ({msg_bytes} bytes)");
+                                }
+                                continue;
+                            }
+                        }
+
                         if text.starts_with(r#"["REQ""#) {
                             if let Some((sub_id, filter)) = parse_req_msg(&text) {
                                 let relay_url = state.relay_url.clone();
@@ -1170,6 +1241,9 @@ mod tests {
             mesh_url: None,
             node_id: None,
             replication_factor: 3,
+            max_events_per_second_per_peer: 50,
+            max_bytes_per_second_per_peer: 1_048_576,
+            max_message_size: 524_288,
         };
 
         let cancel_mesh = cancel.clone();
@@ -1242,6 +1316,9 @@ mod tests {
             mesh_url: None,
             node_id: None,
             replication_factor: 3,
+            max_events_per_second_per_peer: 50,
+            max_bytes_per_second_per_peer: 1_048_576,
+            max_message_size: 524_288,
         };
 
         let cancel_a = cancel.clone();
@@ -1262,6 +1339,9 @@ mod tests {
             mesh_url: None,
             node_id: None,
             replication_factor: 3,
+            max_events_per_second_per_peer: 50,
+            max_bytes_per_second_per_peer: 1_048_576,
+            max_message_size: 524_288,
         };
 
         let cancel_b = cancel.clone();
@@ -1357,6 +1437,9 @@ mod tests {
             mesh_url: None,
             node_id: None,
             replication_factor: 3,
+            max_events_per_second_per_peer: 50,
+            max_bytes_per_second_per_peer: 1_048_576,
+            max_message_size: 524_288,
         };
 
         let cancel_a = cancel.clone();
@@ -1377,6 +1460,9 @@ mod tests {
             mesh_url: None,
             node_id: None,
             replication_factor: 3,
+            max_events_per_second_per_peer: 50,
+            max_bytes_per_second_per_peer: 1_048_576,
+            max_message_size: 524_288,
         };
 
         let cancel_b = cancel.clone();
@@ -1435,6 +1521,9 @@ mod tests {
             mesh_url: None,
             node_id: None,
             replication_factor: 3,
+            max_events_per_second_per_peer: 50,
+            max_bytes_per_second_per_peer: 1_048_576,
+            max_message_size: 524_288,
         };
 
         let cancel_a = cancel.clone();
@@ -1479,21 +1568,8 @@ mod tests {
         let temp_dir = tempfile::tempdir()?;
         let data_dir = temp_dir.path().to_path_buf();
 
-        let state = MeshState {
-            seen_ids: DashSet::new(),
-            deleted_ids: DashSet::new(),
-            expiring_events: DashMap::new(),
-            peer_cursors: DashMap::new(),
-            latest_replaceable: DashMap::new(),
-            relay_tx: mpsc::channel(1).0,
-            connected_peers: DashSet::new(),
-            peer_channels: DashMap::new(),
-            replication_factor: 3,
-            events_stored: AtomicU64::new(0),
-            events_replicated: AtomicU64::new(0),
-            relay_url: "ws://127.0.0.1:7777".to_string(),
-            data_dir: Some(data_dir.clone()),
-        };
+        let mut state = make_test_state();
+        state.data_dir = Some(data_dir.clone());
 
         state.seen_ids.insert("evt_persisted_1".to_string());
         state.seen_ids.insert("evt_persisted_2".to_string());
@@ -1582,6 +1658,9 @@ mod tests {
             mesh_url: Some(seed_a.clone()),
             node_id: Some("node-A".to_string()),
             replication_factor: 3,
+            max_events_per_second_per_peer: 50,
+            max_bytes_per_second_per_peer: 1_048_576,
+            max_message_size: 524_288,
         };
         let cancel_a = cancel.clone();
         tokio::spawn(async move {
@@ -1609,6 +1688,9 @@ mod tests {
             mesh_url: Some(format!("ws://{addr_b1}")),
             node_id: Some("node-B".to_string()),
             replication_factor: 3,
+            max_events_per_second_per_peer: 50,
+            max_bytes_per_second_per_peer: 1_048_576,
+            max_message_size: 524_288,
         };
 
         let c_b1 = cancel_b1.clone();
@@ -1654,6 +1736,9 @@ mod tests {
             mesh_url: Some(format!("ws://{addr_b2}")),
             node_id: Some("node-B".to_string()),
             replication_factor: 3,
+            max_events_per_second_per_peer: 50,
+            max_bytes_per_second_per_peer: 1_048_576,
+            max_message_size: 524_288,
         };
 
         let c_b2 = cancel_b2.clone();
@@ -1674,21 +1759,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_replaceable_events_newer_overwrites_older() {
-        let state = MeshState {
-            seen_ids: DashSet::new(),
-            deleted_ids: DashSet::new(),
-            expiring_events: DashMap::new(),
-            peer_cursors: DashMap::new(),
-            latest_replaceable: DashMap::new(),
-            relay_tx: mpsc::channel(1).0,
-            connected_peers: DashSet::new(),
-            peer_channels: DashMap::new(),
-            replication_factor: 3,
-            events_stored: AtomicU64::new(0),
-            events_replicated: AtomicU64::new(0),
-            relay_url: "ws://127.0.0.1:7777".to_string(),
-            data_dir: None,
-        };
+        let state = make_test_state();
 
         let evt_v1 = r#"["EVENT",{"id":"id_v1","pubkey":"pub_alice","kind":0,"created_at":1000,"content":"name: Alice v1"}]"#;
         let evt_v2 = r#"["EVENT",{"id":"id_v2","pubkey":"pub_alice","kind":0,"created_at":2000,"content":"name: Alice v2"}]"#;
@@ -1702,21 +1773,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_replaceable_events_stale_discarded() {
-        let state = MeshState {
-            seen_ids: DashSet::new(),
-            deleted_ids: DashSet::new(),
-            expiring_events: DashMap::new(),
-            peer_cursors: DashMap::new(),
-            latest_replaceable: DashMap::new(),
-            relay_tx: mpsc::channel(1).0,
-            connected_peers: DashSet::new(),
-            peer_channels: DashMap::new(),
-            replication_factor: 3,
-            events_stored: AtomicU64::new(0),
-            events_replicated: AtomicU64::new(0),
-            relay_url: "ws://127.0.0.1:7777".to_string(),
-            data_dir: None,
-        };
+        let state = make_test_state();
 
         let evt_v2 = r#"["EVENT",{"id":"id_v2","pubkey":"pub_alice","kind":0,"created_at":2000,"content":"name: Alice v2"}]"#;
         let evt_v1 = r#"["EVENT",{"id":"id_v1","pubkey":"pub_alice","kind":0,"created_at":1000,"content":"name: Alice v1"}]"#;
@@ -1729,21 +1786,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_replaceable_events_backfill_latest_only() {
-        let state = MeshState {
-            seen_ids: DashSet::new(),
-            deleted_ids: DashSet::new(),
-            expiring_events: DashMap::new(),
-            peer_cursors: DashMap::new(),
-            latest_replaceable: DashMap::new(),
-            relay_tx: mpsc::channel(1).0,
-            connected_peers: DashSet::new(),
-            peer_channels: DashMap::new(),
-            replication_factor: 3,
-            events_stored: AtomicU64::new(0),
-            events_replicated: AtomicU64::new(0),
-            relay_url: "ws://127.0.0.1:7777".to_string(),
-            data_dir: None,
-        };
+        let state = make_test_state();
 
         let backfill_v1 = r#"["EVENT","sub_bf",{"id":"bf_1","pubkey":"pub_bob","kind":3,"created_at":100,"content":"contacts v1"}]"#;
         let backfill_v3 = r#"["EVENT","sub_bf",{"id":"bf_3","pubkey":"pub_bob","kind":3,"created_at":300,"content":"contacts v3"}]"#;
@@ -1766,9 +1809,16 @@ mod tests {
             relay_tx: mpsc::channel(1).0,
             connected_peers: DashSet::new(),
             peer_channels: DashMap::new(),
+            rate_limiters: DashMap::new(),
             replication_factor: 3,
+            max_events_per_sec: 50,
+            max_bytes_per_sec: 1_048_576,
+            max_msg_size: 524_288,
             events_stored: AtomicU64::new(0),
             events_replicated: AtomicU64::new(0),
+            events_rate_limited: AtomicU64::new(0),
+            bytes_rate_limited: AtomicU64::new(0),
+            messages_oversized: AtomicU64::new(0),
             relay_url: "ws://127.0.0.1:7777".to_string(),
             data_dir: None,
         }

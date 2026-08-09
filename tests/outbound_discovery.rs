@@ -26,12 +26,7 @@ async fn test_outbound_seed_reconnect_and_sync() -> anyhow::Result<()> {
     let cfg_a = MeshConfig {
         listen: addr_a.to_string(),
         seeds: vec![],
-        registry_url: None,
-        heartbeat_secs: 30,
-        discovery_secs: 60,
-        mesh_url: None,
-        node_id: None,
-        replication_factor: 3,
+        ..MeshConfig::default()
     };
 
     let cancel_a = cancel.clone();
@@ -46,12 +41,7 @@ async fn test_outbound_seed_reconnect_and_sync() -> anyhow::Result<()> {
     let cfg_b = MeshConfig {
         listen: addr_b.to_string(),
         seeds: vec![format!("ws://{addr_a}")],
-        registry_url: None,
-        heartbeat_secs: 30,
-        discovery_secs: 60,
-        mesh_url: None,
-        node_id: None,
-        replication_factor: 3,
+        ..MeshConfig::default()
     };
 
     let cancel_b = cancel.clone();
@@ -123,32 +113,17 @@ async fn test_mesh_deduplication_triangle_loop() -> anyhow::Result<()> {
     let cfg_a = MeshConfig {
         listen: addr_a.to_string(),
         seeds: vec![],
-        registry_url: None,
-        heartbeat_secs: 30,
-        discovery_secs: 60,
-        mesh_url: None,
-        node_id: None,
-        replication_factor: 3,
+        ..MeshConfig::default()
     };
     let cfg_b = MeshConfig {
         listen: addr_b.to_string(),
         seeds: vec![format!("ws://{addr_a}")],
-        registry_url: None,
-        heartbeat_secs: 30,
-        discovery_secs: 60,
-        mesh_url: None,
-        node_id: None,
-        replication_factor: 3,
+        ..MeshConfig::default()
     };
     let cfg_c = MeshConfig {
         listen: addr_c.to_string(),
         seeds: vec![format!("ws://{addr_a}"), format!("ws://{addr_b}")],
-        registry_url: None,
-        heartbeat_secs: 30,
-        discovery_secs: 60,
-        mesh_url: None,
-        node_id: None,
-        replication_factor: 3,
+        ..MeshConfig::default()
     };
 
     let c_a = cancel.clone();

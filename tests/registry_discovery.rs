@@ -167,7 +167,7 @@ async fn test_three_nodes_dynamic_discovery_full_mesh() -> anyhow::Result<()> {
         discovery_secs: 1,
         mesh_url: Some(format!("ws://{addr_a}")),
         node_id: Some("node-A".to_string()),
-        replication_factor: 3,
+        ..MeshConfig::default()
     };
 
     let c_a = cancel.clone();
@@ -186,7 +186,7 @@ async fn test_three_nodes_dynamic_discovery_full_mesh() -> anyhow::Result<()> {
         discovery_secs: 1,
         mesh_url: Some(format!("ws://{addr_b}")),
         node_id: Some("node-B".to_string()),
-        replication_factor: 3,
+        ..MeshConfig::default()
     };
 
     let c_b = cancel.clone();
@@ -208,7 +208,7 @@ async fn test_three_nodes_dynamic_discovery_full_mesh() -> anyhow::Result<()> {
         discovery_secs: 1,
         mesh_url: Some(format!("ws://{addr_c}")),
         node_id: Some("node-C".to_string()),
-        replication_factor: 3,
+        ..MeshConfig::default()
     };
 
     let c_c = cancel.clone();
@@ -269,7 +269,7 @@ async fn test_registry_resilience_outage_and_recovery() -> anyhow::Result<()> {
         discovery_secs: 1,
         mesh_url: Some(format!("ws://{addr_a}")),
         node_id: Some("node-A-resilient".to_string()),
-        replication_factor: 3,
+        ..MeshConfig::default()
     };
 
     let c_a = cancel.clone();
@@ -289,7 +289,7 @@ async fn test_registry_resilience_outage_and_recovery() -> anyhow::Result<()> {
         discovery_secs: 1,
         mesh_url: Some(format!("ws://{addr_b}")),
         node_id: Some("node-B-resilient".to_string()),
-        replication_factor: 3,
+        ..MeshConfig::default()
     };
 
     let c_b = cancel.clone();

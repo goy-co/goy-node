@@ -90,7 +90,7 @@ async fn test_five_nodes_replication_factor_three() -> anyhow::Result<()> {
             discovery_secs: 60,
             mesh_url: Some(mesh_urls[i].clone()),
             node_id: Some(format!("node-{}", i)),
-            replication_factor: 3,
+            ..MeshConfig::default()
         };
 
         let c = cancel.clone();
@@ -159,7 +159,7 @@ async fn test_replication_resilience_on_node_failure() -> anyhow::Result<()> {
         discovery_secs: 60,
         mesh_url: Some(mesh_urls[0].clone()),
         node_id: Some("node-0".to_string()),
-        replication_factor: 3,
+        ..MeshConfig::default()
     };
     let c0 = cancel_node0.clone();
     tokio::spawn(async move {
@@ -176,7 +176,7 @@ async fn test_replication_resilience_on_node_failure() -> anyhow::Result<()> {
         discovery_secs: 60,
         mesh_url: Some(mesh_urls[1].clone()),
         node_id: Some("node-1".to_string()),
-        replication_factor: 3,
+        ..MeshConfig::default()
     };
     let c1 = cancel.clone();
     tokio::spawn(async move {
@@ -193,7 +193,7 @@ async fn test_replication_resilience_on_node_failure() -> anyhow::Result<()> {
         discovery_secs: 60,
         mesh_url: Some(mesh_urls[2].clone()),
         node_id: Some("node-2".to_string()),
-        replication_factor: 3,
+        ..MeshConfig::default()
     };
     let c2 = cancel.clone();
     tokio::spawn(async move {
