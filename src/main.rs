@@ -5,6 +5,7 @@
 
 use std::path::PathBuf;
 
+use clap::Parser;
 use directories::ProjectDirs;
 use tokio::signal;
 use tokio_util::sync::CancellationToken;
@@ -15,8 +16,29 @@ mod config;
 mod mesh;
 mod relay;
 
+/// Opções CLI para o Goy Node
+#[derive(Parser, Debug)]
+#[command(
+    name = "goy-node",
+    version = env!("CARGO_PKG_VERSION"),
+    author = "The Goy Company",
+    about = "Mesh agent for Goy Node — automatic Nostr relay synchronization"
+)]
+struct Cli {
+    /// Caminho alternativo para o ficheiro de configuração config.toml
+    #[arg(short, long, value_name = "PATH")]
+    config: Option<PathBuf>,
+
+    /// Caminho alternativo para o diretório de dados (seen_ids, peer_cursors)
+    #[arg(short, long, value_name = "PATH")]
+    data_dir: Option<PathBuf>,
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // Parse de argumentos CLI (trata --help e --version automaticamente)
+    let cli = Cli::parse();
+
     // ── Logging estruturado ────────────────────────────────────────────
     fmt()
         .with_env_filter(
@@ -30,17 +52,31 @@ async fn main() -> anyhow::Result<()> {
     let project_dirs = ProjectDirs::from("com", "the-goy-company", "goy-node")
         .expect("failed to determine project directories");
 
-    let config_path = std::env::var("GOY_NODE_CONFIG")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| project_dirs.config_dir().join("config.toml"));
+    let config_path = cli
+        .config
+        .or_else(|| std::env::var("GOY_NODE_CONFIG").map(PathBuf::from).ok())
+        .unwrap_or_else(|| project_dirs.config_dir().join("config.toml"));
 
-    let cfg = config::Config::load(&config_path)?;
+    let data_dir = cli
+        .data_dir
+        .or_else(|| std::env::var("GOY_NODE_DATA_DIR").map(PathBuf::from).ok())
+        .unwrap_or_else(|| project_dirs.data_dir().to_path_buf());
+
+    let cfg = match config::Config::load_or_generate(&config_path) {
+        Ok(c) => c,
+        Err(e) => {
+            error!("❌ Configuration error: {e}");
+            std::process::exit(1);
+        }
+    };
+
     info!("✔ Config loaded from {}", config_path.display());
-    info!("  Relay URL : {}", cfg.relay.url);
-    info!("  Data dir  : {}", project_dirs.data_dir().display());
+    info!("  Relay URL  : {}", cfg.relay.url);
+    info!("  Listen addr: {}", cfg.mesh.listen);
+    info!("  Data dir   : {}", data_dir.display());
 
     // ── Graceful shutdown ──────────────────────────────────────────────
-    let cancel = CancellationToken::new(); // ← movido para CIMA
+    let cancel = CancellationToken::new();
     let cancel_clone = cancel.clone();
 
     tokio::spawn(async move {
@@ -61,6 +97,8 @@ async fn main() -> anyhow::Result<()> {
     // ── Mesh Agent ─────────────────────────────────────────────────────
     let mesh_handle = tokio::spawn(mesh::run(
         cfg.mesh,
+        cfg.relay.url.clone(),
+        Some(data_dir),
         relay_events,
         relay_publisher,
         cancel.clone(),

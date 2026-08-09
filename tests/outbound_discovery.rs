@@ -23,7 +23,7 @@ async fn test_outbound_seed_reconnect_and_sync() -> anyhow::Result<()> {
 
     let cancel_a = cancel.clone();
     tokio::spawn(async move {
-        let _ = goy_node::mesh::run(cfg_a, relay_events_rx_a, relay_publish_tx_a, cancel_a).await;
+        let _ = goy_node::mesh::run(cfg_a, "ws://127.0.0.1:57777".to_string(), None, relay_events_rx_a, relay_publish_tx_a, cancel_a).await;
     });
 
     // ── Node B (seeds = ["ws://127.0.0.1:19446"], listening on 19447) ──────────
@@ -39,7 +39,7 @@ async fn test_outbound_seed_reconnect_and_sync() -> anyhow::Result<()> {
 
     let cancel_b = cancel.clone();
     tokio::spawn(async move {
-        let _ = goy_node::mesh::run(cfg_b, relay_events_rx_b, relay_publish_tx_b, cancel_b).await;
+        let _ = goy_node::mesh::run(cfg_b, "ws://127.0.0.1:57777".to_string(), None, relay_events_rx_b, relay_publish_tx_b, cancel_b).await;
     });
 
     // Aguarda o Node B fazer a conexão outbound para o Node A
@@ -54,7 +54,10 @@ async fn test_outbound_seed_reconnect_and_sync() -> anyhow::Result<()> {
     let received_b = tokio::time::timeout(Duration::from_secs(2), relay_publish_rx_b.recv())
         .await?
         .ok_or_else(|| anyhow::anyhow!("Node B did not receive event"))?;
-    assert_eq!(received_b, event_1);
+    assert_eq!(
+        received_b,
+        r#"["EVENT",{"id":"e000000000000000000000000000000000000000000000000000000000000001","content":"Test A to B"}]"#
+    );
 
     // 2. Transmissão do Node B -> Node A
     let event_2 = r#"["EVENT","sub_2",{"id":"e000000000000000000000000000000000000000000000000000000000000002","content":"Test B to A"}]"#;
@@ -65,7 +68,10 @@ async fn test_outbound_seed_reconnect_and_sync() -> anyhow::Result<()> {
     let received_a = tokio::time::timeout(Duration::from_secs(2), relay_publish_rx_a.recv())
         .await?
         .ok_or_else(|| anyhow::anyhow!("Node A did not receive event"))?;
-    assert_eq!(received_a, event_2);
+    assert_eq!(
+        received_a,
+        r#"["EVENT",{"id":"e000000000000000000000000000000000000000000000000000000000000002","content":"Test B to A"}]"#
+    );
 
     cancel.cancel();
     Ok(())
@@ -105,11 +111,11 @@ async fn test_mesh_deduplication_triangle_loop() -> anyhow::Result<()> {
     };
 
     let c_a = cancel.clone();
-    tokio::spawn(async move { let _ = goy_node::mesh::run(cfg_a, relay_events_rx_a, relay_publish_tx_a, c_a).await; });
+    tokio::spawn(async move { let _ = goy_node::mesh::run(cfg_a, "ws://127.0.0.1:57777".to_string(), None, relay_events_rx_a, relay_publish_tx_a, c_a).await; });
     let c_b = cancel.clone();
-    tokio::spawn(async move { let _ = goy_node::mesh::run(cfg_b, relay_events_rx_b, relay_publish_tx_b, c_b).await; });
+    tokio::spawn(async move { let _ = goy_node::mesh::run(cfg_b, "ws://127.0.0.1:57777".to_string(), None, relay_events_rx_b, relay_publish_tx_b, c_b).await; });
     let c_c = cancel.clone();
-    tokio::spawn(async move { let _ = goy_node::mesh::run(cfg_c, relay_events_rx_c, relay_publish_tx_c, c_c).await; });
+    tokio::spawn(async move { let _ = goy_node::mesh::run(cfg_c, "ws://127.0.0.1:57777".to_string(), None, relay_events_rx_c, relay_publish_tx_c, c_c).await; });
 
     tokio::time::sleep(Duration::from_millis(400)).await;
 
@@ -125,8 +131,9 @@ async fn test_mesh_deduplication_triangle_loop() -> anyhow::Result<()> {
         .await?
         .ok_or_else(|| anyhow::anyhow!("Node C recv error"))?;
 
-    assert_eq!(rec_b, event_loop);
-    assert_eq!(rec_c, event_loop);
+    let expected_norm = r#"["EVENT",{"id":"loop_event_999","content":"loop check"}]"#;
+    assert_eq!(rec_b, expected_norm);
+    assert_eq!(rec_c, expected_norm);
 
     // Aguarda um momento para garantir que não há loops infinitos nem mensagens repetidas
     tokio::time::sleep(Duration::from_millis(200)).await;
