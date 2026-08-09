@@ -15,6 +15,7 @@ use tracing_subscriber::{EnvFilter, fmt};
 mod config;
 mod event_types;
 mod mesh;
+mod rate_limiter;
 mod registry;
 mod relay;
 
