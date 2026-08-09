@@ -262,6 +262,24 @@ impl Config {
     }
 }
 
+impl Default for MeshConfig {
+    fn default() -> Self {
+        Self {
+            listen: "0.0.0.0:8443".to_string(),
+            seeds: vec![],
+            registry_url: None,
+            heartbeat_secs: default_heartbeat(),
+            discovery_secs: default_discovery(),
+            mesh_url: None,
+            node_id: None,
+            replication_factor: default_replication_factor(),
+            max_events_per_second_per_peer: default_max_events_per_sec(),
+            max_bytes_per_second_per_peer: default_max_bytes_per_sec(),
+            max_message_size: default_max_msg_size(),
+        }
+    }
+}
+
 impl Default for Config {
     fn default() -> Self {
         Config {
@@ -269,19 +287,7 @@ impl Default for Config {
                 url: "ws://127.0.0.1:7777".to_string(),
                 import_cmd: None,
             },
-            mesh: MeshConfig {
-                listen: "0.0.0.0:8443".to_string(),
-                seeds: vec![],
-                registry_url: None,
-                heartbeat_secs: default_heartbeat(),
-                discovery_secs: default_discovery(),
-                mesh_url: None,
-                node_id: None,
-                replication_factor: default_replication_factor(),
-                max_events_per_second_per_peer: default_max_events_per_sec(),
-                max_bytes_per_second_per_peer: default_max_bytes_per_sec(),
-                max_message_size: default_max_msg_size(),
-            },
+            mesh: MeshConfig::default(),
         }
     }
 }
