@@ -235,6 +235,7 @@ impl Default for Config {
                 discovery_secs: default_discovery(),
                 mesh_url: None,
                 node_id: None,
+                replication_factor: default_replication_factor(),
             },
         }
     }
