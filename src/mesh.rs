@@ -29,6 +29,8 @@ use crate::relay::RelayEvent;
 pub struct MeshState {
     /// Event IDs já vistos (dedup global).
     pub seen_ids: DashSet<String>,
+    /// Conjunto de event IDs que foram explicitamente deletados (NIP-09).
+    pub deleted_ids: DashSet<String>,
     /// Último timestamp (created_at) visto por peer para backfill incremental.
     pub peer_cursors: DashMap<String, u64>,
     /// Registro da versão mais recente de eventos substituíveis (replacement_key -> (created_at, event_id)).
@@ -143,12 +145,19 @@ pub fn process_replaceable_event(state: &MeshState, raw_event: &str) -> bool {
         return true; // Não é um objeto evento, permite parse normal
     };
 
+    let event_id = event_obj.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+
+    // Verificar se o evento foi deletado (NIP-09)
+    if state.deleted_ids.contains(&event_id) {
+        tracing::debug!("🗑️ Skipping deleted event {event_id}");
+        return false;
+    }
+
     let Some(key) = crate::event_types::replacement_key(&event_obj) else {
         return true; // Não é evento substituível
     };
 
     let created_at = event_obj.get("created_at").and_then(|v| v.as_u64()).unwrap_or(0);
-    let event_id = event_obj.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
 
     if let Some(entry) = state.latest_replaceable.get(&key) {
         let (stored_created_at, stored_id) = entry.value();
@@ -168,14 +177,64 @@ pub fn process_replaceable_event(state: &MeshState, raw_event: &str) -> bool {
     true
 }
 
+/// Processa um evento de deleção (kind 5, NIP-09).
+/// - Verifica autoridade: apenas o autor pode deletar os seus próprios eventos.
+/// - Por tags `e`: marca os event IDs como deletados em `state.deleted_ids`.
+/// - Por tags `a`: remove a entrada correspondente de `state.latest_replaceable`.
+/// Retorna `true` se o evento de deleção foi processado com sucesso (deve ser replicado),
+/// `false` se for inválido (sem pubkey) — mas sempre replica kind 5 válidos para que os outros
+/// nós também apliquem a deleção.
+pub fn process_deletion_event(state: &MeshState, raw_event: &str) -> bool {
+    let Some(event_obj) = crate::event_types::extract_event_object(raw_event) else {
+        return true;
+    };
+
+    let kind = event_obj.get("kind").and_then(|v| v.as_u64()).unwrap_or(0);
+    if !crate::event_types::is_deletion(kind) {
+        return true; // Não é evento de deleção, permitir processamento normal
+    }
+
+    let Some(del_pubkey) = event_obj.get("pubkey").and_then(|v| v.as_str()) else {
+        tracing::debug!("🗑️ Deletion event missing pubkey, discarding");
+        return false;
+    };
+
+    // Processar tags `e` (deleção por ID de evento)
+    let e_tags = crate::event_types::extract_e_tags(&event_obj);
+    for target_id in &e_tags {
+        state.deleted_ids.insert(target_id.clone());
+        // Também remover de latest_replaceable se esse evento era substituível
+        state.latest_replaceable.retain(|_, v| v.1 != *target_id);
+        info!("🗑️ Deleted event {target_id} by {del_pubkey} (tag e)");
+    }
+
+    // Processar tags `a` (deleção por coordenada de evento substituível)
+    let a_tags = crate::event_types::extract_a_tags(&event_obj);
+    for coord_key in &a_tags {
+        // Validar autoridade: a coordenada deve pertencer ao mesmo pubkey
+        // Formato: "pubkey:kind" ou "pubkey:kind:d_tag"
+        let coord_pubkey = coord_key.split(':').next().unwrap_or("");
+        if coord_pubkey != del_pubkey {
+            tracing::debug!("🗑️ Deletion of `a` tag {coord_key} rejected: pubkey mismatch ({del_pubkey} != {coord_pubkey})");
+            continue;
+        }
+        if state.latest_replaceable.remove(coord_key).is_some() {
+            info!("🗑️ Deleted replaceable event at coord {coord_key} by {del_pubkey} (tag a)");
+        }
+    }
+
+    true
+}
+
 /// Carrega seen_ids e peer_cursors do disco.
-fn load_state(data_dir: Option<&Path>) -> (DashSet<String>, DashMap<String, u64>) {
+fn load_state(data_dir: Option<&Path>) -> (DashSet<String>, DashSet<String>, DashMap<String, u64>) {
     let seen_ids = DashSet::new();
+    let deleted_ids = DashSet::new();
     let peer_cursors = DashMap::new();
 
     let dir = match data_dir {
         Some(d) => d,
-        None => return (seen_ids, peer_cursors),
+        None => return (seen_ids, deleted_ids, peer_cursors),
     };
 
     // 1. Carregar seen_ids.json
@@ -199,7 +258,28 @@ fn load_state(data_dir: Option<&Path>) -> (DashSet<String>, DashMap<String, u64>
         }
     }
 
-    // 2. Carregar peer_cursors.json
+    // 2. Carregar deleted_ids.json
+    let deleted_file = dir.join("deleted_ids.json");
+    if deleted_file.exists() {
+        match std::fs::read(&deleted_file) {
+            Ok(bytes) => match serde_json::from_slice::<Vec<String>>(&bytes) {
+                Ok(ids) => {
+                    info!("🗑️  Loaded {} deleted event IDs from {}", ids.len(), deleted_file.display());
+                    for id in ids {
+                        deleted_ids.insert(id);
+                    }
+                }
+                Err(e) => {
+                    warn!("⚠️  Failed to parse {}: {e}. Starting fresh with empty deleted_ids.", deleted_file.display());
+                }
+            },
+            Err(e) => {
+                warn!("⚠️  Failed to read {}: {e}. Starting fresh with empty deleted_ids.", deleted_file.display());
+            }
+        }
+    }
+
+    // 3. Carregar peer_cursors.json
     let cursors_file = dir.join("peer_cursors.json");
     if cursors_file.exists() {
         match std::fs::read(&cursors_file) {
@@ -220,7 +300,7 @@ fn load_state(data_dir: Option<&Path>) -> (DashSet<String>, DashMap<String, u64>
         }
     }
 
-    (seen_ids, peer_cursors)
+    (seen_ids, deleted_ids, peer_cursors)
 }
 
 /// Guarda o estado em disco atomicamente (escrita em .tmp + rename).
@@ -245,7 +325,17 @@ fn save_state(state: &MeshState) {
         }
     }
 
-    // 2. Salvar peer_cursors.json
+    // 2. Salvar deleted_ids.json
+    let deleted_vec: Vec<String> = state.deleted_ids.iter().map(|r| r.clone()).collect();
+    if let Ok(bytes) = serde_json::to_vec(&deleted_vec) {
+        let final_path = dir.join("deleted_ids.json");
+        let tmp_path = dir.join("deleted_ids.json.tmp");
+        if std::fs::write(&tmp_path, bytes).is_ok() {
+            let _ = std::fs::rename(tmp_path, final_path);
+        }
+    }
+
+    // 3. Salvar peer_cursors.json
     let cursors_map: std::collections::HashMap<String, u64> = state
         .peer_cursors
         .iter()
@@ -259,7 +349,8 @@ fn save_state(state: &MeshState) {
         }
     }
 
-    info!("💾 State saved to disk ({} seen_ids, {} cursors)", seen_vec.len(), cursors_map.len());
+    info!("💾 State saved to disk ({} seen_ids, {} deleted_ids, {} cursors)",
+        seen_vec.len(), deleted_vec.len(), cursors_map.len());
 }
 
 /// Guard RAII para remover o peer de `connected_peers` quando a sessão termina.
@@ -316,10 +407,11 @@ pub async fn run(
     relay_publish_tx: mpsc::Sender<String>,
     cancel: CancellationToken,
 ) -> anyhow::Result<()> {
-    let (seen_ids, peer_cursors) = load_state(data_dir.as_deref());
+    let (seen_ids, deleted_ids, peer_cursors) = load_state(data_dir.as_deref());
 
     let state = Arc::new(MeshState {
         seen_ids,
+        deleted_ids,
         peer_cursors,
         latest_replaceable: DashMap::new(),
         relay_tx: relay_publish_tx,
@@ -352,6 +444,9 @@ pub async fn run(
                     match result {
                         Ok(event) => {
                             if let Some(id) = extract_event_id(&event.raw) {
+                                // Processar deleções (NIP-09) antes de qualquer outra coisa
+                                process_deletion_event(&state_clone, &event.raw);
+                                // Verificar substituição e deduplicação
                                 if process_replaceable_event(&state_clone, &event.raw) {
                                     if state_clone.seen_ids.insert(id.clone()) {
                                         info!("📡 Local relay event {id} received, replicating to peers");
@@ -737,6 +832,9 @@ async fn handle_peer_stream<Si, St>(
                                         .and_modify(|c| *c = (*c).max(ts))
                                         .or_insert(ts);
                                 }
+                                // Processar deleções (NIP-09) antes de qualquer outra coisa
+                                process_deletion_event(&state, &text);
+                                // Verificar substituição e deduplicação
                                 if process_replaceable_event(&state, &text) {
                                     if state.seen_ids.insert(id.clone()) {
                                         info!("📥 Event {id} received from peer {peer_id}, publishing to local relay");
@@ -1301,6 +1399,7 @@ mod tests {
 
         let state = MeshState {
             seen_ids: DashSet::new(),
+            deleted_ids: DashSet::new(),
             peer_cursors: DashMap::new(),
             latest_replaceable: DashMap::new(),
             relay_tx: mpsc::channel(1).0,
@@ -1315,19 +1414,21 @@ mod tests {
 
         state.seen_ids.insert("evt_persisted_1".to_string());
         state.seen_ids.insert("evt_persisted_2".to_string());
+        state.deleted_ids.insert("evt_deleted_1".to_string());
         state.peer_cursors.insert("ws://127.0.0.1:19999".to_string(), 1786290000);
 
         save_state(&state);
 
         // Carrega estado e verifica persistência
-        let (loaded_seen, loaded_cursors) = load_state(Some(&data_dir));
+        let (loaded_seen, loaded_deleted, loaded_cursors) = load_state(Some(&data_dir));
         assert!(loaded_seen.contains("evt_persisted_1"));
         assert!(loaded_seen.contains("evt_persisted_2"));
+        assert!(loaded_deleted.contains("evt_deleted_1"), "deleted_ids must persist");
         assert_eq!(loaded_cursors.get("ws://127.0.0.1:19999").map(|c| *c.value()), Some(1786290000));
 
         // Simula corrupção de ficheiro
         std::fs::write(data_dir.join("seen_ids.json"), b"corrupted data {{{")?;
-        let (corrupt_seen, _corrupt_cursors) = load_state(Some(&data_dir));
+        let (corrupt_seen, _, _corrupt_cursors) = load_state(Some(&data_dir));
         assert!(corrupt_seen.is_empty(), "Corrupt file should fallback to empty set without panic");
 
         Ok(())
@@ -1492,6 +1593,7 @@ mod tests {
     async fn test_replaceable_events_newer_overwrites_older() {
         let state = MeshState {
             seen_ids: DashSet::new(),
+            deleted_ids: DashSet::new(),
             peer_cursors: DashMap::new(),
             latest_replaceable: DashMap::new(),
             relay_tx: mpsc::channel(1).0,
@@ -1518,6 +1620,7 @@ mod tests {
     async fn test_replaceable_events_stale_discarded() {
         let state = MeshState {
             seen_ids: DashSet::new(),
+            deleted_ids: DashSet::new(),
             peer_cursors: DashMap::new(),
             latest_replaceable: DashMap::new(),
             relay_tx: mpsc::channel(1).0,
@@ -1543,6 +1646,7 @@ mod tests {
     async fn test_replaceable_events_backfill_latest_only() {
         let state = MeshState {
             seen_ids: DashSet::new(),
+            deleted_ids: DashSet::new(),
             peer_cursors: DashMap::new(),
             latest_replaceable: DashMap::new(),
             relay_tx: mpsc::channel(1).0,
@@ -1564,6 +1668,104 @@ mod tests {
         assert!(!process_replaceable_event(&state, backfill_v2), "v2 is older than v3, must be rejected");
 
         assert_eq!(state.latest_replaceable.get("pub_bob:3").map(|r| r.value().clone()), Some((300, "bf_3".to_string())));
+    }
+
+    fn make_test_state() -> MeshState {
+        MeshState {
+            seen_ids: DashSet::new(),
+            deleted_ids: DashSet::new(),
+            peer_cursors: DashMap::new(),
+            latest_replaceable: DashMap::new(),
+            relay_tx: mpsc::channel(1).0,
+            connected_peers: DashSet::new(),
+            peer_channels: DashMap::new(),
+            replication_factor: 3,
+            events_stored: AtomicU64::new(0),
+            events_replicated: AtomicU64::new(0),
+            relay_url: "ws://127.0.0.1:7777".to_string(),
+            data_dir: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn test_deletion_by_e_tag_marks_event_deleted() {
+        let state = make_test_state();
+
+        let del_event = r#"["EVENT",{"id":"del_1","pubkey":"pub_alice","kind":5,"created_at":9000,"tags":[["e","target_event_1"],["e","target_event_2"]]}]"#;
+        let result = process_deletion_event(&state, del_event);
+        assert!(result, "Valid deletion event should return true");
+        assert!(state.deleted_ids.contains("target_event_1"), "target_event_1 must be deleted");
+        assert!(state.deleted_ids.contains("target_event_2"), "target_event_2 must be deleted");
+    }
+
+    #[tokio::test]
+    async fn test_deleted_event_rejected_by_process_replaceable() {
+        let state = make_test_state();
+
+        // Mark an event as deleted
+        state.deleted_ids.insert("profile_evt_1".to_string());
+
+        // Now try to process it as a replaceable event
+        let profile_evt = r#"["EVENT",{"id":"profile_evt_1","pubkey":"pub_alice","kind":0,"created_at":5000,"content":"name: Alice"}]"#;
+        let accepted = process_replaceable_event(&state, profile_evt);
+        assert!(!accepted, "Deleted event must be rejected by process_replaceable_event");
+    }
+
+    #[tokio::test]
+    async fn test_deletion_by_a_tag_removes_replaceable() {
+        let state = make_test_state();
+
+        // First register a replaceable event in the store
+        state.latest_replaceable.insert("pub_alice:0".to_string(), (1000, "profile_id_1".to_string()));
+        assert!(state.latest_replaceable.contains_key("pub_alice:0"));
+
+        // Send a deletion event targeting the "a" coordinate "0:pub_alice"
+        let del_event = r#"["EVENT",{"id":"del_a_1","pubkey":"pub_alice","kind":5,"created_at":9000,"tags":[["a","0:pub_alice"]]}]"#;
+        process_deletion_event(&state, del_event);
+
+        assert!(!state.latest_replaceable.contains_key("pub_alice:0"),
+            "Replaceable event must be removed from store after 'a' tag deletion");
+    }
+
+    #[tokio::test]
+    async fn test_deletion_authority_mismatch_rejected() {
+        let state = make_test_state();
+
+        // Mallory tries to delete Alice's replaceable event
+        state.latest_replaceable.insert("pub_alice:0".to_string(), (1000, "alice_profile".to_string()));
+
+        let del_event = r#"["EVENT",{"id":"del_mal","pubkey":"pub_mallory","kind":5,"created_at":9000,"tags":[["a","0:pub_alice"]]}]"#;
+        process_deletion_event(&state, del_event);
+
+        assert!(state.latest_replaceable.contains_key("pub_alice:0"),
+            "Deletion by wrong pubkey must be ignored");
+    }
+
+    #[tokio::test]
+    async fn test_deletion_of_parameterized_replaceable_by_a_tag() {
+        let state = make_test_state();
+
+        state.latest_replaceable.insert("pub_bob:30001:my-list".to_string(), (500, "list_event_id".to_string()));
+
+        // Deletion via a tag: "30001:pub_bob:my-list"
+        let del_event = r#"["EVENT",{"id":"del_list","pubkey":"pub_bob","kind":5,"created_at":9000,"tags":[["a","30001:pub_bob:my-list"]]}]"#;
+        process_deletion_event(&state, del_event);
+
+        assert!(!state.latest_replaceable.contains_key("pub_bob:30001:my-list"),
+            "Parameterized replaceable event must be removed by 'a' tag deletion");
+    }
+
+    #[tokio::test]
+    async fn test_backfill_event_deleted_before_arrival_is_discarded() {
+        let state = make_test_state();
+
+        // Pre-mark a backfill event as deleted
+        state.deleted_ids.insert("historical_evt_99".to_string());
+
+        // Now this event arrives during backfill
+        let backfill_evt = r#"["EVENT","sub_bf",{"id":"historical_evt_99","pubkey":"pub_carol","kind":1,"created_at":1000,"content":"Hello"}]"#;
+        let accepted = process_replaceable_event(&state, backfill_evt);
+        assert!(!accepted, "Event deleted before backfill arrival must be discarded");
     }
 }
 

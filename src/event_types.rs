@@ -1,4 +1,4 @@
-//! Módulo para classificação e chaveamento de eventos Nostr (NIP-01, NIP-16, NIP-33).
+//! Módulo para classificação e chaveamento de eventos Nostr (NIP-01, NIP-09, NIP-16, NIP-33).
 
 use serde_json::Value;
 
@@ -52,6 +52,61 @@ pub fn replacement_key(event: &Value) -> Option<String> {
     } else {
         Some(format!("{pubkey}:{kind}"))
     }
+}
+
+/// Verifica se o `kind` é um evento de deleção (NIP-09).
+/// Kind 5 = evento de deleção.
+pub fn is_deletion(kind: u64) -> bool {
+    kind == 5
+}
+
+/// Extrai os event IDs referenciados nas tags `e` de um evento de deleção (NIP-09).
+/// Retorna Vec de IDs a deletar.
+pub fn extract_e_tags(event: &Value) -> Vec<String> {
+    let mut ids = Vec::new();
+    if let Some(tags) = event.get("tags").and_then(|t| t.as_array()) {
+        for tag in tags {
+            if let Some(tag_arr) = tag.as_array() {
+                if tag_arr.len() >= 2 && tag_arr[0].as_str() == Some("e") {
+                    if let Some(id) = tag_arr[1].as_str() {
+                        ids.push(id.to_string());
+                    }
+                }
+            }
+        }
+    }
+    ids
+}
+
+/// Extrai as coordenadas de eventos substituíveis nas tags `a` de um evento de deleção (NIP-09).
+/// Formato da coordenada: "kind:pubkey" ou "kind:pubkey:d_tag".
+/// Retorna Vec de chaves de substituição (replacement keys).
+pub fn extract_a_tags(event: &Value) -> Vec<String> {
+    let mut keys = Vec::new();
+    if let Some(tags) = event.get("tags").and_then(|t| t.as_array()) {
+        for tag in tags {
+            if let Some(tag_arr) = tag.as_array() {
+                if tag_arr.len() >= 2 && tag_arr[0].as_str() == Some("a") {
+                    if let Some(coord) = tag_arr[1].as_str() {
+                        // Coordenada formato NIP-33: "kind:pubkey" ou "kind:pubkey:d_tag"
+                        // Converter para o formato de replacement_key: "pubkey:kind" ou "pubkey:kind:d_tag"
+                        let parts: Vec<&str> = coord.splitn(3, ':').collect();
+                        if parts.len() >= 2 {
+                            let kind_str = parts[0];
+                            let pubkey = parts[1];
+                            let d_tag = parts.get(2).copied().unwrap_or("");
+                            if d_tag.is_empty() {
+                                keys.push(format!("{pubkey}:{kind_str}"));
+                            } else {
+                                keys.push(format!("{pubkey}:{kind_str}:{d_tag}"));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    keys
 }
 
 /// Extrai o objeto de evento a partir de uma mensagem Nostr JSON raw.
@@ -127,6 +182,53 @@ mod tests {
             "tags": [["t", "nostr"]]
         });
         assert_eq!(extract_d_tag(&event_without_d), "");
+    }
+
+    #[test]
+    fn test_is_deletion() {
+        assert!(is_deletion(5));
+        assert!(!is_deletion(0));
+        assert!(!is_deletion(1));
+        assert!(!is_deletion(3));
+    }
+
+    #[test]
+    fn test_extract_e_tags() {
+        let event = json!({
+            "kind": 5,
+            "pubkey": "pub_alice",
+            "tags": [
+                ["e", "event_id_1"],
+                ["e", "event_id_2"],
+                ["p", "other_pubkey"]
+            ]
+        });
+        let ids = extract_e_tags(&event);
+        assert_eq!(ids, vec!["event_id_1", "event_id_2"]);
+    }
+
+    #[test]
+    fn test_extract_e_tags_empty() {
+        let event = json!({"kind": 5, "tags": [["p", "other"]]});
+        assert!(extract_e_tags(&event).is_empty());
+    }
+
+    #[test]
+    fn test_extract_a_tags() {
+        let event = json!({
+            "kind": 5,
+            "pubkey": "pub_alice",
+            "tags": [
+                ["a", "0:pub_alice"],
+                ["a", "30001:pub_bob:my-list"],
+                ["e", "event_id_1"]
+            ]
+        });
+        let keys = extract_a_tags(&event);
+        // Conversion: "kind:pubkey" -> "pubkey:kind", "kind:pubkey:d" -> "pubkey:kind:d"
+        assert!(keys.contains(&"pub_alice:0".to_string()));
+        assert!(keys.contains(&"pub_bob:30001:my-list".to_string()));
+        assert_eq!(keys.len(), 2);
     }
 
     #[test]
