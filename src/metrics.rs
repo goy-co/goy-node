@@ -65,6 +65,10 @@ pub struct Metrics {
     /// peers conectados (gauge). Atualizado pelo MeshState quando um peer
     /// liga/desliga — não é derivado dos counters.
     pub peers_connected: AtomicU64,
+    /// Métricas de Consistent Hashing e Rebalanceamento.
+    pub hash_ring_peers: AtomicU64,
+    pub hash_ring_vnodes: AtomicU64,
+    pub rebalance_events_sent: AtomicU64,
     /// Instante de arranque do nó, para cálculo do gauge `goy_uptime_seconds`.
     pub started_at: Instant,
 }
@@ -88,6 +92,9 @@ impl Metrics {
             backfill_requests: AtomicU64::new(0),
             messages_oversized: AtomicU64::new(0),
             peers_connected: AtomicU64::new(0),
+            hash_ring_peers: AtomicU64::new(0),
+            hash_ring_vnodes: AtomicU64::new(0),
+            rebalance_events_sent: AtomicU64::new(0),
             started_at: Instant::now(),
         }
     }
@@ -196,6 +203,24 @@ impl Metrics {
         s.push_str("# HELP goy_messages_oversized_total Messages rejected for exceeding max_message_size.\n");
         s.push_str("# TYPE goy_messages_oversized_total counter\n");
         s.push_str(&format!("goy_messages_oversized_total {oversized}\n"));
+
+        // goy_hash_ring_peers
+        let ring_peers = self.hash_ring_peers.load(Ordering::Relaxed);
+        s.push_str("# HELP goy_hash_ring_peers Number of physical peers present in the consistent hash ring.\n");
+        s.push_str("# TYPE goy_hash_ring_peers gauge\n");
+        s.push_str(&format!("goy_hash_ring_peers {ring_peers}\n"));
+
+        // goy_hash_ring_vnodes
+        let ring_vnodes = self.hash_ring_vnodes.load(Ordering::Relaxed);
+        s.push_str("# HELP goy_hash_ring_vnodes Total virtual nodes active in the consistent hash ring.\n");
+        s.push_str("# TYPE goy_hash_ring_vnodes gauge\n");
+        s.push_str(&format!("goy_hash_ring_vnodes {ring_vnodes}\n"));
+
+        // goy_rebalance_events_sent_total
+        let rebalanced = self.rebalance_events_sent.load(Ordering::Relaxed);
+        s.push_str("# HELP goy_rebalance_events_sent_total Total events transferred during background hash ring rebalancing.\n");
+        s.push_str("# TYPE goy_rebalance_events_sent_total counter\n");
+        s.push_str(&format!("goy_rebalance_events_sent_total {rebalanced}\n"));
 
         // goy_uptime_seconds
         s.push_str("# HELP goy_uptime_seconds Seconds since the node process started.\n");

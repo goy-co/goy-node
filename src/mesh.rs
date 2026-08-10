@@ -4,8 +4,6 @@
 //! - Recebe eventos de peers e publica no relay local
 //! - Deduplica por event ID para evitar loops
 
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -145,6 +143,8 @@ pub struct MeshState {
     pub metrics: Arc<Metrics>,
     /// Sessões de peers ativas com estatísticas de tráfego e metadados.
     pub active_peer_sessions: DashMap<String, Arc<PeerSessionInfo>>,
+    /// Anel de consistent hashing para replicação e rebalanceamento uniforme.
+    pub hash_ring: Arc<std::sync::RwLock<crate::consistent_hash::ConsistentHashRing>>,
     /// WebSocket URL do relay local para consultas de backfill.
     pub relay_url: String,
     /// Diretório para persistência de estado em disco (opcional).
@@ -164,61 +164,29 @@ impl MeshState {
     }
 }
 
-/// Seleciona deterministicamente os peers para replicação de um evento Nostr com base no event ID.
+/// Seleciona os peers para replicação de um evento Nostr usando o anel de Consistent Hashing.
 pub fn select_replication_peers(
+    state: &MeshState,
     event_id: &str,
-    connected_peers: &[String],
     source_peer: Option<&str>,
-    replication_factor: u32,
 ) -> Vec<String> {
+    let replication_factor = state.replication_factor as usize;
     if replication_factor <= 1 {
         return vec![];
     }
-    let target_count = (replication_factor - 1) as usize;
+    let target_count = replication_factor - 1;
 
-    let filtered: Vec<String> = connected_peers
-        .iter()
-        .filter(|p| source_peer.map_or(true, |src| src != *p))
-        .cloned()
-        .collect();
+    let ring = state.hash_ring.read().unwrap();
+    let responsible = ring.get_responsible_peers(event_id, replication_factor);
 
-    if filtered.is_empty() {
-        return vec![];
-    }
-
-    // Deduplica conexões para evitar enviar para o mesmo nó via inbound e outbound (prefere outbound ws://)
-    let outbound: Vec<String> = filtered
-        .iter()
-        .filter(|p| p.starts_with("ws://") || p.starts_with("wss://"))
-        .cloned()
-        .collect();
-    let candidates = if !outbound.is_empty() {
-        outbound
-    } else {
-        filtered
-    };
-
-    if candidates.len() <= target_count {
-        return candidates;
-    }
-
-    let mut scored: Vec<(&String, u64)> = candidates
-        .iter()
-        .map(|p| {
-            let mut hasher = DefaultHasher::new();
-            event_id.hash(&mut hasher);
-            p.hash(&mut hasher);
-            (p, hasher.finish())
-        })
-        .collect();
-
-    // Ordenar de forma decrescente pelo score. Desempate por peer ID para estabilidade.
-    scored.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(b.0)));
-
-    scored.into_iter().take(target_count).map(|(p, _)| p.clone()).collect()
+    responsible
+        .into_iter()
+        .filter(|p| source_peer.map_or(true, |src| src != p))
+        .take(target_count)
+        .collect()
 }
 
-/// Encaminha o evento para `replication_factor - 1` peers selecionados deterministicamente.
+/// Encaminha o evento para `replication_factor - 1` peers selecionados pelo Consistent Hash Ring.
 pub fn replicate_event(
     state: &Arc<MeshState>,
     event_id: &str,
@@ -232,8 +200,7 @@ pub fn replicate_event(
         return;
     }
 
-    let connected: Vec<String> = state.peer_channels.iter().map(|r| r.key().clone()).collect();
-    let targets = select_replication_peers(event_id, &connected, source_peer, replication_factor);
+    let targets = select_replication_peers(state, event_id, source_peer);
 
     if targets.is_empty() {
         return;
@@ -551,6 +518,12 @@ impl Drop for PeerGuard {
         self.state.rate_limiters.remove(&self.peer_id);
         self.state.active_peer_sessions.remove(&self.peer_id);
         self.state.metrics.dec_peers_connected();
+
+        if let Ok(mut ring) = self.state.hash_ring.write() {
+            ring.remove_peer(&self.peer_id);
+            self.state.metrics.hash_ring_peers.store(ring.peer_count() as u64, Ordering::Relaxed);
+            self.state.metrics.hash_ring_vnodes.store(ring.vnode_count() as u64, Ordering::Relaxed);
+        }
     }
 }
 
@@ -642,6 +615,9 @@ pub async fn run_with_http_listen(
         messages_oversized: AtomicU64::new(0),
         metrics: metrics.clone(),
         active_peer_sessions: DashMap::new(),
+        hash_ring: Arc::new(std::sync::RwLock::new(
+            crate::consistent_hash::ConsistentHashRing::new(cfg.vnodes_per_peer as usize),
+        )),
         relay_url,
         data_dir: data_dir.clone(),
     });
@@ -1218,6 +1194,20 @@ async fn handle_peer_stream<Si, St>(
     });
     state.active_peer_sessions.insert(peer_id.clone(), session_info);
 
+    {
+        let mut ring = state.hash_ring.write().unwrap();
+        ring.add_peer(&peer_id);
+        state.metrics.hash_ring_peers.store(ring.peer_count() as u64, Ordering::Relaxed);
+        state.metrics.hash_ring_vnodes.store(ring.vnode_count() as u64, Ordering::Relaxed);
+    }
+
+    let state_rebal = state.clone();
+    let peer_id_rebal = peer_id.clone();
+    let cancel_rebal = cancel.clone();
+    tokio::spawn(async move {
+        rebalance_to_new_peer(state_rebal, peer_id_rebal, cancel_rebal).await;
+    });
+
     let _guard = PeerGuard {
         state: state.clone(),
         peer_id: peer_id.clone(),
@@ -1401,6 +1391,68 @@ async fn handle_peer_stream<Si, St>(
 
     send_task.abort();
     info!("👋 Peer session ended: {peer_id}");
+}
+
+/// Rebalanceamento em background: ao entrar um novo peer na mesh, consulta os eventos
+/// locais e envia ao novo peer aqueles pelos quais ele passou a ser responsável no anel.
+async fn rebalance_to_new_peer(
+    state: Arc<MeshState>,
+    new_peer_id: String,
+    cancel: CancellationToken,
+) {
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    if cancel.is_cancelled() || !state.peer_channels.contains_key(&new_peer_id) {
+        return;
+    }
+
+    let replication_factor = state.replication_factor as usize;
+    if replication_factor == 0 {
+        return;
+    }
+
+    let event_ids: Vec<String> = state.seen_ids.iter().map(|r| r.clone()).collect();
+    if event_ids.is_empty() {
+        return;
+    }
+
+    let mut target_ids = Vec::new();
+    {
+        let ring = state.hash_ring.read().unwrap();
+        for event_id in event_ids {
+            let responsible = ring.get_responsible_peers(&event_id, replication_factor);
+            if responsible.contains(&new_peer_id) {
+                target_ids.push(event_id);
+            }
+        }
+    }
+
+    if target_ids.is_empty() {
+        return;
+    }
+
+    let ctrl_tx = match state.peer_channels.get(&new_peer_id) {
+        Some(tx) => tx.value().clone(),
+        None => return,
+    };
+
+    let filter = serde_json::json!({
+        "ids": target_ids,
+        "limit": target_ids.len()
+    });
+
+    let rebalanced_count = target_ids.len() as u64;
+    state.metrics.rebalance_events_sent.fetch_add(rebalanced_count, Ordering::Relaxed);
+    info!("🔄 Rebalancing: sent {rebalanced_count} events to new peer {new_peer_id}");
+
+    handle_backfill_req(
+        "goy-rebalance".to_string(),
+        Some(filter),
+        state.relay_url.clone(),
+        new_peer_id,
+        ctrl_tx,
+    )
+    .await;
 }
 
 /// Handler de consulta de backfill no relay local para responder ao REQ do peer.
@@ -1618,6 +1670,7 @@ mod tests {
             mesh_url: None,
             node_id: None,
             replication_factor: 3,
+            vnodes_per_peer: 150,
             max_events_per_second_per_peer: 50,
             max_bytes_per_second_per_peer: 1_048_576,
             max_message_size: 524_288,
@@ -1699,6 +1752,7 @@ mod tests {
             mesh_url: None,
             node_id: None,
             replication_factor: 3,
+            vnodes_per_peer: 150,
             max_events_per_second_per_peer: 50,
             max_bytes_per_second_per_peer: 1_048_576,
             max_message_size: 524_288,
@@ -1725,6 +1779,7 @@ mod tests {
             mesh_url: None,
             node_id: None,
             replication_factor: 3,
+            vnodes_per_peer: 150,
             max_events_per_second_per_peer: 50,
             max_bytes_per_second_per_peer: 1_048_576,
             max_message_size: 524_288,
@@ -1828,6 +1883,7 @@ mod tests {
             mesh_url: None,
             node_id: None,
             replication_factor: 3,
+            vnodes_per_peer: 150,
             max_events_per_second_per_peer: 50,
             max_bytes_per_second_per_peer: 1_048_576,
             max_message_size: 524_288,
@@ -1854,6 +1910,7 @@ mod tests {
             mesh_url: None,
             node_id: None,
             replication_factor: 3,
+            vnodes_per_peer: 150,
             max_events_per_second_per_peer: 50,
             max_bytes_per_second_per_peer: 1_048_576,
             max_message_size: 524_288,
@@ -1920,6 +1977,7 @@ mod tests {
             mesh_url: None,
             node_id: None,
             replication_factor: 3,
+            vnodes_per_peer: 150,
             max_events_per_second_per_peer: 50,
             max_bytes_per_second_per_peer: 1_048_576,
             max_message_size: 524_288,
@@ -2060,6 +2118,7 @@ mod tests {
             mesh_url: Some(seed_a.clone()),
             node_id: Some("node-A".to_string()),
             replication_factor: 3,
+            vnodes_per_peer: 150,
             max_events_per_second_per_peer: 50,
             max_bytes_per_second_per_peer: 1_048_576,
             max_message_size: 524_288,
@@ -2093,6 +2152,7 @@ mod tests {
             mesh_url: Some(format!("ws://{addr_b1}")),
             node_id: Some("node-B".to_string()),
             replication_factor: 3,
+            vnodes_per_peer: 150,
             max_events_per_second_per_peer: 50,
             max_bytes_per_second_per_peer: 1_048_576,
             max_message_size: 524_288,
@@ -2144,6 +2204,7 @@ mod tests {
             mesh_url: Some(format!("ws://{addr_b2}")),
             node_id: Some("node-B".to_string()),
             replication_factor: 3,
+            vnodes_per_peer: 150,
             max_events_per_second_per_peer: 50,
             max_bytes_per_second_per_peer: 1_048_576,
             max_message_size: 524_288,
@@ -2232,6 +2293,9 @@ mod tests {
             messages_oversized: AtomicU64::new(0),
             metrics: Arc::new(Metrics::new()),
             active_peer_sessions: DashMap::new(),
+            hash_ring: Arc::new(std::sync::RwLock::new(
+                crate::consistent_hash::ConsistentHashRing::new(150),
+            )),
             relay_url: "ws://127.0.0.1:7777".to_string(),
             data_dir: None,
         }

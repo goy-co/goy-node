@@ -14,6 +14,7 @@ use tracing_subscriber::{EnvFilter, fmt};
 
 mod cli;
 mod config;
+mod consistent_hash;
 mod event_types;
 mod http;
 mod mesh;

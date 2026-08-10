@@ -79,6 +79,9 @@ pub struct MeshConfig {
     /// Fator de replicação N-of-M (default: 3). 0 = desativar replicação ativa
     #[serde(default = "default_replication_factor")]
     pub replication_factor: u32,
+    /// Número de nós virtuais por peer físico para consistent hashing (default: 150)
+    #[serde(default = "default_vnodes_per_peer")]
+    pub vnodes_per_peer: u32,
     /// Limite de eventos por segundo por peer (default: 50)
     #[serde(default = "default_max_events_per_sec")]
     pub max_events_per_second_per_peer: u32,
@@ -103,6 +106,10 @@ pub struct MetricsConfig {
     /// `None` desativa o servidor HTTP.
     #[serde(default = "default_metrics_listen")]
     pub listen: Option<String>,
+}
+
+fn default_vnodes_per_peer() -> u32 {
+    150
 }
 
 fn default_metrics_listen() -> Option<String> {
@@ -238,6 +245,13 @@ impl Config {
             }
         }
 
+        if let Ok(vn_raw) = std::env::var("GOY_NODE_VNODES_PER_PEER") {
+            if let Ok(vn) = vn_raw.parse::<u32>() {
+                info!("🔧 Override from env GOY_NODE_VNODES_PER_PEER: {vn}");
+                self.mesh.vnodes_per_peer = vn;
+            }
+        }
+
         if let Ok(v_raw) = std::env::var("GOY_NODE_MAX_EVENTS_PER_SEC") {
             if let Ok(v) = v_raw.parse::<u32>() {
                 info!("🔧 Override from env GOY_NODE_MAX_EVENTS_PER_SEC: {v}");
@@ -367,6 +381,7 @@ impl Default for MeshConfig {
             mesh_url: None,
             node_id: None,
             replication_factor: default_replication_factor(),
+            vnodes_per_peer: default_vnodes_per_peer(),
             max_events_per_second_per_peer: default_max_events_per_sec(),
             max_bytes_per_second_per_peer: default_max_bytes_per_sec(),
             max_message_size: default_max_msg_size(),

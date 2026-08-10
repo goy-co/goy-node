@@ -1,5 +1,6 @@
 pub mod cli;
 pub mod config;
+pub mod consistent_hash;
 pub mod event_types;
 pub mod http;
 pub mod mesh;
