@@ -14,6 +14,7 @@ MACOS_PLIST_FILE="/Library/LaunchDaemons/com.goyco.goy-node.plist"
 DEFAULT_ENV_FILE="/etc/default/goy-node"
 SYSTEM_USER="goy-node"
 SYSTEM_GROUP="goy-node"
+GOY_NODE_VERSION="${GOY_NODE_VERSION:-v0.1.0-alpha}"
 
 # Funções de logging
 info() { echo -e "\033[34m[INFO]\033[0m $*"; }
@@ -23,14 +24,19 @@ error() { echo -e "\033[31m[ERROR]\033[0m $*" >&2; exit 1; }
 
 usage() {
     cat <<EOF
-Uso: $0 [opções]
+Uso: $0 [opções] [versão]
 
 Opções:
-  --install     Instala o binário, configura diretórios e ativa o serviço (padrão)
-  --uninstall   Para o serviço, desativa e remove os ficheiros instalados
-  --build       Força a recompilação local com cargo em release antes de instalar
-  --help        Exibe esta mensagem de ajuda
+  --install           Instala o binário, configura diretórios e ativa o serviço (padrão)
+  --uninstall         Para o serviço, desativa e remove os ficheiros instalados
+  --build             Força a recompilação local com cargo em release antes de instalar
+  --version <versão>  Especifica a versão da release a descarregar (padrão: ${GOY_NODE_VERSION})
+  --help              Exibe esta mensagem de ajuda
 
+Exemplos:
+  $0                         # Instala versão ${GOY_NODE_VERSION} pré-compilada
+  $0 v0.1.0-alpha            # Instala versão v0.1.0-alpha
+  $0 --build                 # Compila localmente via cargo build --release
 EOF
     exit 0
 }
@@ -38,18 +44,43 @@ EOF
 MODE="install"
 FORCE_BUILD=false
 
-for arg in "$@"; do
-    case "$arg" in
-        --uninstall) MODE="uninstall" ;;
-        --build) FORCE_BUILD=true ;;
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --uninstall) MODE="uninstall"; shift ;;
+        --build) FORCE_BUILD=true; shift ;;
+        --version)
+            if [ -n "${2:-}" ]; then
+                GOY_NODE_VERSION="$2"
+                shift 2
+            else
+                error "Opção --version requer um argumento."
+            fi
+            ;;
         --help|-h) usage ;;
-        *) warn "Opção desconhecida: $arg" ;;
+        v*) GOY_NODE_VERSION="$1"; shift ;;
+        *) warn "Opção desconhecida: $1"; shift ;;
     esac
 done
 
 check_root() {
     if [ "$(id -u)" -ne 0 ]; then
         error "Este script requer privilégios de root (sudo $0)."
+    fi
+}
+
+get_release_arch() {
+    if [[ "$OSTYPE" == "darwin"* ]]; then
+        if [[ "$(uname -m)" == "arm64" ]]; then
+            echo "aarch64-apple-darwin"
+        else
+            echo "x86_64-apple-darwin"
+        fi
+    else
+        if [[ "$(uname -m)" == "aarch64" ]]; then
+            echo "aarch64-unknown-linux-musl"
+        else
+            echo "x86_64-unknown-linux-gnu"
+        fi
     fi
 }
 
@@ -93,31 +124,50 @@ do_install() {
     check_root
     info "🟢 A iniciar a instalação do Goy Node..."
 
-    # 1. Verificar/Compilar Binário
     SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
     PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-
     BINARY_PATH="$PROJECT_ROOT/target/release/goy-node"
 
-    if [ "$FORCE_BUILD" = true ] || [ ! -f "$BINARY_PATH" ]; then
+    mkdir -p "$INSTALL_BIN_DIR"
+
+    # 1 & 2. Obter e Instalar Binário
+    if [ "$FORCE_BUILD" = true ]; then
         info "A compilar o binário em modo release (cargo build --release)..."
         if command -v cargo >/dev/null 2>&1; then
             (cd "$PROJECT_ROOT" && cargo build --release)
+            if [ -f "$BINARY_PATH" ]; then
+                cp "$BINARY_PATH" "$INSTALL_BIN_DIR/goy-node"
+                chmod 755 "$INSTALL_BIN_DIR/goy-node"
+                success "Binário local instalado em $INSTALL_BIN_DIR/goy-node."
+            else
+                error "Binário não encontrado em $BINARY_PATH após o build."
+            fi
         else
-            error "Cargo não está instalado. Por favor instale Rust/Cargo ou forneça o binário compilado em target/release/goy-node."
+            error "Cargo não está instalado. Por favor instale Rust/Cargo para compilar localmente."
+        fi
+    else
+        ARCH="$(get_release_arch)"
+        RELEASE_URL="https://github.com/the-goy-company/node/releases/download/${GOY_NODE_VERSION}/goy-node-${GOY_NODE_VERSION}-${ARCH}.tar.gz"
+        info "A descarregar binário ${ARCH} da release ${GOY_NODE_VERSION}..."
+
+        TMP_DIR=$(mktemp -d)
+        if curl -fsSL "$RELEASE_URL" | tar xz -C "$TMP_DIR" 2>/dev/null && [ -f "${TMP_DIR}/goy-node" ]; then
+            cp "${TMP_DIR}/goy-node" "$INSTALL_BIN_DIR/goy-node"
+            chmod 755 "$INSTALL_BIN_DIR/goy-node"
+            rm -rf "$TMP_DIR"
+            success "Binário ${GOY_NODE_VERSION} instalado com sucesso em $INSTALL_BIN_DIR/goy-node."
+        elif [ -f "$BINARY_PATH" ]; then
+            rm -rf "$TMP_DIR"
+            warn "Falha ao descarregar a release ${GOY_NODE_VERSION} de ${RELEASE_URL}."
+            info "A utilizar binário local compilado em $BINARY_PATH..."
+            cp "$BINARY_PATH" "$INSTALL_BIN_DIR/goy-node"
+            chmod 755 "$INSTALL_BIN_DIR/goy-node"
+            success "Binário local instalado em $INSTALL_BIN_DIR/goy-node."
+        else
+            rm -rf "$TMP_DIR"
+            error "Não foi possível descarregar a release ${GOY_NODE_VERSION} nem encontrar o binário local em ${BINARY_PATH}.\nUse --build para compilar localmente."
         fi
     fi
-
-    if [ ! -f "$BINARY_PATH" ]; then
-        error "Binário não encontrado em $BINARY_PATH"
-    fi
-
-    # 2. Copiar Binário
-    info "A instalar binário em $INSTALL_BIN_DIR/goy-node..."
-    mkdir -p "$INSTALL_BIN_DIR"
-    cp "$BINARY_PATH" "$INSTALL_BIN_DIR/goy-node"
-    chmod 755 "$INSTALL_BIN_DIR/goy-node"
-    success "Binário instalado em $INSTALL_BIN_DIR/goy-node."
 
     # 3. Criar Utilizador e Grupo de Sistema
     if [[ "$OSTYPE" == "darwin"* ]]; then
