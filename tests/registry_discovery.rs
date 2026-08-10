@@ -67,6 +67,16 @@ impl MockRegistry {
                                 let node_id = path.trim_start_matches("/relays/").to_string();
                                 if let Some(relay) = relays.lock().unwrap().get_mut(&node_id) {
                                     relay.last_seen = Some(chrono::Utc::now().timestamp() as u64);
+                                    if let Some(body_idx) = req_str.find("\r\n\r\n") {
+                                        let body = &req_str[body_idx + 4..];
+                                        if let Ok(val) = serde_json::from_str::<serde_json::Value>(body) {
+                                            if let Some(st) = val.get("storage") {
+                                                if let Ok(st_meta) = serde_json::from_value::<goy_node::registry::StorageMetadata>(st.clone()) {
+                                                    relay.storage = Some(st_meta);
+                                                }
+                                            }
+                                        }
+                                    }
                                 }
                                 let response = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK";
                                 let _ = socket.write_all(response.as_bytes()).await;
@@ -120,6 +130,7 @@ async fn test_registry_client_http_ops() -> anyhow::Result<()> {
         capabilities: vec!["nostr".to_string(), "mesh".to_string()],
         cert_fingerprint: None,
         last_seen: None,
+        storage: None,
     };
 
     // 1. Register POST /relays
@@ -132,7 +143,7 @@ async fn test_registry_client_http_ops() -> anyhow::Result<()> {
     assert_eq!(fetched[0].node_id, "node-test-1");
 
     // 3. Heartbeat PUT /relays/{node_id}
-    client.heartbeat("node-test-1").await?;
+    client.heartbeat("node-test-1", None).await?;
     assert!(
         mock.relays
             .lock()
@@ -373,5 +384,71 @@ async fn test_registry_resilience_outage_and_recovery() -> anyhow::Result<()> {
     );
 
     cancel.cancel();
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_registry_storage_metadata_registration_and_heartbeat() -> anyhow::Result<()> {
+    let mock = MockRegistry::start().await?;
+    let client = RegistryClient::new(mock.url.clone());
+
+    let storage_initial = goy_node::registry::StorageMetadata {
+        reserved_gb: 100,
+        available_gb: 400,
+    };
+
+    let info = RelayInfo {
+        node_id: "storage-node-1".to_string(),
+        relay_url: "ws://127.0.0.1:7777".to_string(),
+        mesh_url: "ws://127.0.0.1:8443".to_string(),
+        version: "0.1.0".to_string(),
+        capabilities: vec!["mesh".to_string()],
+        cert_fingerprint: None,
+        last_seen: None,
+        storage: Some(storage_initial),
+    };
+
+    // 1. Register com metadata de storage
+    client.register(&info).await?;
+    let registered = mock
+        .relays
+        .lock()
+        .unwrap()
+        .get("storage-node-1")
+        .cloned()
+        .unwrap();
+    assert_eq!(
+        registered.storage,
+        Some(goy_node::registry::StorageMetadata {
+            reserved_gb: 100,
+            available_gb: 400,
+        })
+    );
+
+    // 2. Heartbeat com metadata de storage atualizada
+    let storage_updated = goy_node::registry::StorageMetadata {
+        reserved_gb: 100,
+        available_gb: 350,
+    };
+    client
+        .heartbeat("storage-node-1", Some(storage_updated))
+        .await?;
+
+    let updated = mock
+        .relays
+        .lock()
+        .unwrap()
+        .get("storage-node-1")
+        .cloned()
+        .unwrap();
+    assert_eq!(
+        updated.storage,
+        Some(goy_node::registry::StorageMetadata {
+            reserved_gb: 100,
+            available_gb: 350,
+        })
+    );
+
+    mock.stop();
     Ok(())
 }

@@ -733,57 +733,57 @@ pub async fn run_with_http_listen_and_storage(
     });
 
     // ── Task Periódica: Atualização de Métricas de Storage (60s) ────────
-    if storage_info.is_some() {
-        if let Some(ref data_dir_buf) = state.data_dir {
-            let metrics_clone = metrics.clone();
-            let data_dir_clone = data_dir_buf.clone();
-            let extra_contribution_gb = storage_info
-                .as_ref()
-                .map(|i| {
-                    i.total_reserved_gb
-                        .saturating_sub(crate::storage::MIN_RESERVED_GB)
-                })
-                .unwrap_or(0);
-            let cancel_clone = cancel.clone();
+    if storage_info.is_some()
+        && let Some(ref data_dir_buf) = state.data_dir
+    {
+        let metrics_clone = metrics.clone();
+        let data_dir_clone = data_dir_buf.clone();
+        let extra_contribution_gb = storage_info
+            .as_ref()
+            .map(|i| {
+                i.total_reserved_gb
+                    .saturating_sub(crate::storage::MIN_RESERVED_GB)
+            })
+            .unwrap_or(0);
+        let cancel_clone = cancel.clone();
 
-            tokio::spawn(async move {
-                let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
-                interval.tick().await;
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+            interval.tick().await;
 
-                loop {
-                    tokio::select! {
-                        _ = cancel_clone.cancelled() => break,
-                        _ = interval.tick() => {
-                            let dir = data_dir_clone.clone();
-                            let storage_cfg = crate::storage::StorageConfig {
-                                extra_contribution_gb,
-                                data_dir: dir,
-                            };
+            loop {
+                tokio::select! {
+                    _ = cancel_clone.cancelled() => break,
+                    _ = interval.tick() => {
+                        let dir = data_dir_clone.clone();
+                        let storage_cfg = crate::storage::StorageConfig {
+                            extra_contribution_gb,
+                            data_dir: dir,
+                        };
 
-                            let metrics_res = tokio::task::spawn_blocking(move || {
-                                crate::storage::get_storage_metrics(&storage_cfg)
-                            }).await;
+                        let metrics_res = tokio::task::spawn_blocking(move || {
+                            crate::storage::get_storage_metrics(&storage_cfg)
+                        }).await;
 
-                            match metrics_res {
-                                Ok(Ok(sm)) => {
-                                    metrics_clone.update_storage_metrics(
-                                        sm.reserved_bytes,
-                                        sm.available_bytes,
-                                        sm.used_bytes,
-                                    );
-                                }
-                                Ok(Err(err)) => {
-                                    warn!("⚠️ Erro ao atualizar métricas periódicas de storage: {err}");
-                                }
-                                Err(err) => {
-                                    warn!("⚠️ Task spawn_blocking de métricas de storage falhou: {err}");
-                                }
+                        match metrics_res {
+                            Ok(Ok(sm)) => {
+                                metrics_clone.update_storage_metrics(
+                                    sm.reserved_bytes,
+                                    sm.available_bytes,
+                                    sm.used_bytes,
+                                );
+                            }
+                            Ok(Err(err)) => {
+                                warn!("⚠️ Erro ao atualizar métricas periódicas de storage: {err}");
+                            }
+                            Err(err) => {
+                                warn!("⚠️ Task spawn_blocking de métricas de storage falhou: {err}");
                             }
                         }
                     }
                 }
-            });
-        }
+            }
+        });
     }
 
     // ── Node ID & Mesh URL Auto-detection ──────────────────────────────
@@ -904,6 +904,10 @@ pub async fn run_with_http_listen_and_storage(
     // ── Registry Central & Dynamic Peer Discovery ──────────────────────
     if let Some(ref registry_url) = cfg.registry_url {
         let registry_client = RegistryClient::new(registry_url.clone());
+        let storage_meta = storage_info
+            .as_ref()
+            .map(registry::StorageMetadata::from_info);
+
         let relay_info = RelayInfo {
             node_id: node_id.clone(),
             relay_url: state.relay_url.clone(),
@@ -912,12 +916,18 @@ pub async fn run_with_http_listen_and_storage(
             capabilities: vec!["nostr".to_string(), "mesh".to_string()],
             cert_fingerprint: cert_fingerprint.clone(),
             last_seen: None,
+            storage: storage_meta,
         };
 
         // Registo inicial na startup (POST /relays)
         if let Err(e) = registry_client.register(&relay_info).await {
             warn!(
                 "⚠️ Initial registry registration failed at {registry_url}: {e}. Operating with static seeds/cache."
+            );
+        } else if let Some(ref st) = relay_info.storage {
+            info!(
+                "📋 Registered storage capacity at registry: {} GB reserved, {} GB available",
+                st.reserved_gb, st.available_gb
             );
         }
 
@@ -926,16 +936,46 @@ pub async fn run_with_http_listen_and_storage(
         let heartbeat_node_id = node_id.clone();
         let cancel_heartbeat = cancel.clone();
         let hb_interval_secs = cfg.heartbeat_secs;
+        let metrics_hb = metrics.clone();
+
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(hb_interval_secs));
             interval.tick().await; // ignora o primeiro tick imediato
+
+            let mut last_logged_avail_gb: Option<u64> = None;
+            let mut last_log_time = std::time::Instant::now();
 
             loop {
                 tokio::select! {
                     _ = cancel_heartbeat.cancelled() => break,
                     _ = interval.tick() => {
-                        if let Err(e) = heartbeat_client.heartbeat(&heartbeat_node_id).await {
+                        let res_b = metrics_hb.storage_reserved_bytes.load(std::sync::atomic::Ordering::Relaxed);
+                        let avail_b = metrics_hb.storage_available_bytes.load(std::sync::atomic::Ordering::Relaxed);
+                        let storage_meta = if res_b > 0 || avail_b > 0 {
+                            Some(registry::StorageMetadata::from_bytes(res_b, avail_b))
+                        } else {
+                            None
+                        };
+
+                        if let Err(e) = heartbeat_client.heartbeat(&heartbeat_node_id, storage_meta.clone()).await {
                             warn!("⚠️ Registry heartbeat failed: {e}");
+                        } else if let Some(ref st) = storage_meta {
+                            let should_log = match last_logged_avail_gb {
+                                None => true,
+                                Some(prev) => {
+                                    let diff = (st.available_gb as i64 - prev as i64).unsigned_abs();
+                                    let ten_percent = prev / 10;
+                                    diff > ten_percent || last_log_time.elapsed() >= Duration::from_secs(600)
+                                }
+                            };
+                            if should_log {
+                                info!(
+                                    "💓 Registry heartbeat sent for {} (storage: {} GB available / {} GB reserved)",
+                                    heartbeat_node_id, st.available_gb, st.reserved_gb
+                                );
+                                last_logged_avail_gb = Some(st.available_gb);
+                                last_log_time = std::time::Instant::now();
+                            }
                         }
                     }
                 }
