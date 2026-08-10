@@ -16,6 +16,15 @@ fn test_auth_key_validation_rules() {
 
 #[tokio::test]
 async fn test_onboard_non_interactive_vpn_only_flow() -> anyhow::Result<()> {
+    if std::process::Command::new("tailscale")
+        .arg("version")
+        .output()
+        .is_err()
+    {
+        eprintln!("⏭️  Skipping test_onboard_non_interactive_vpn_only_flow: tailscale CLI not available");
+        return Ok(());
+    }
+
     unsafe {
         std::env::set_var("GOY_API_MOCK", "1");
     }
@@ -87,6 +96,15 @@ async fn test_onboard_invalid_auth_key_returns_code_2() -> anyhow::Result<()> {
 
 #[tokio::test]
 async fn test_offboard_cleans_state_files() -> anyhow::Result<()> {
+    if std::process::Command::new("tailscale")
+        .arg("version")
+        .output()
+        .is_err()
+    {
+        eprintln!("⏭️  Skipping test_offboard_cleans_state_files: tailscale CLI not available");
+        return Ok(());
+    }
+
     unsafe {
         std::env::set_var("GOY_API_MOCK", "1");
     }
