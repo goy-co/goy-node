@@ -168,6 +168,7 @@ async fn test_onboard_storage_verification_failure_returns_code_5() -> anyhow::R
 }
 
 #[tokio::test]
+#[allow(clippy::permissions_set_readonly_false)]
 async fn test_onboard_storage_failure_preserves_data_dir_structure() -> anyhow::Result<()> {
     let dir = tempdir()?;
     let data_dir = dir.path().join("data_onboard_storage_fail");

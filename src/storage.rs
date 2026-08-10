@@ -457,4 +457,43 @@ mod tests {
         let res = verify_storage(&cfg);
         assert!(res.is_err());
     }
+
+    #[test]
+    fn test_calculate_directory_size_bytes_handles_symlinks() -> anyhow::Result<()> {
+        let temp_dir = tempfile::tempdir()?;
+        let target_file = temp_dir.path().join("target.txt");
+        std::fs::write(&target_file, vec![0u8; 1000])?;
+
+        let symlink_path = temp_dir.path().join("symlink.txt");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&target_file, &symlink_path)?;
+
+        let size = calculate_directory_size_bytes(temp_dir.path());
+        assert_eq!(size, 1000);
+        Ok(())
+    }
+
+    #[test]
+    fn test_concurrent_get_storage_metrics() -> anyhow::Result<()> {
+        let temp_dir = tempfile::tempdir()?;
+        let cfg = std::sync::Arc::new(StorageConfig {
+            extra_contribution_gb: 10,
+            data_dir: temp_dir.path().to_path_buf(),
+        });
+
+        let mut handles = vec![];
+        for _ in 0..10 {
+            let cfg_clone = cfg.clone();
+            handles.push(std::thread::spawn(move || get_storage_metrics(&cfg_clone)));
+        }
+
+        for handle in handles {
+            let res = handle.join().unwrap();
+            assert!(res.is_ok());
+            let metrics = res.unwrap();
+            assert_eq!(metrics.reserved_bytes, 60 * 1_073_741_824);
+        }
+
+        Ok(())
+    }
 }

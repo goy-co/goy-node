@@ -69,12 +69,11 @@ impl MockRegistry {
                                     relay.last_seen = Some(chrono::Utc::now().timestamp() as u64);
                                     if let Some(body_idx) = req_str.find("\r\n\r\n") {
                                         let body = &req_str[body_idx + 4..];
-                                        if let Ok(val) = serde_json::from_str::<serde_json::Value>(body) {
-                                            if let Some(st) = val.get("storage") {
-                                                if let Ok(st_meta) = serde_json::from_value::<goy_node::registry::StorageMetadata>(st.clone()) {
-                                                    relay.storage = Some(st_meta);
-                                                }
-                                            }
+                                        if let Ok(val) = serde_json::from_str::<serde_json::Value>(body)
+                                            && let Some(st) = val.get("storage")
+                                            && let Ok(st_meta) = serde_json::from_value::<goy_node::registry::StorageMetadata>(st.clone())
+                                        {
+                                            relay.storage = Some(st_meta);
                                         }
                                     }
                                 }
