@@ -9,9 +9,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libssl-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# Copiar ficheiros de manifesto e código fonte
+# Copiar ficheiros de manifesto, código fonte e benchmarks
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
+COPY benches ./benches
 
 # Compilar o binário em modo release
 RUN cargo build --release --bin goy-node
