@@ -71,15 +71,15 @@ check_root() {
 get_release_arch() {
     if [[ "$OSTYPE" == "darwin"* ]]; then
         if [[ "$(uname -m)" == "arm64" ]]; then
-            echo "aarch64-apple-darwin"
+            echo "aarch64-macos"
         else
-            echo "x86_64-apple-darwin"
+            echo "x86_64-macos"
         fi
     else
         if [[ "$(uname -m)" == "aarch64" ]]; then
-            echo "aarch64-unknown-linux-musl"
+            echo "aarch64-linux"
         else
-            echo "x86_64-unknown-linux-gnu"
+            echo "x86_64-linux"
         fi
     fi
 }
@@ -147,8 +147,14 @@ do_install() {
         fi
     else
         ARCH="$(get_release_arch)"
-        RELEASE_URL="https://github.com/goy-co/goy-node/releases/download/${GOY_NODE_VERSION}/goy-node-${GOY_NODE_VERSION}-${ARCH}.tar.gz"
-        info "A descarregar binário ${ARCH} da release ${GOY_NODE_VERSION}..."
+        TAG_VERSION="${GOY_NODE_VERSION}"
+        if [[ "$TAG_VERSION" != v* ]]; then
+            TAG_VERSION="v${TAG_VERSION}"
+        fi
+        CLEAN_VERSION="${TAG_VERSION#v}"
+
+        RELEASE_URL="https://github.com/goy-co/goy-node/releases/download/${TAG_VERSION}/goy-node-${CLEAN_VERSION}-${ARCH}.tar.gz"
+        info "A descarregar binário ${ARCH} da release ${TAG_VERSION}..."
 
         TMP_DIR=$(mktemp -d)
         if curl -fsSL "$RELEASE_URL" | tar xz -C "$TMP_DIR" 2>/dev/null && [ -f "${TMP_DIR}/goy-node" ]; then
