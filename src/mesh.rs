@@ -696,6 +696,13 @@ pub async fn run_with_http_listen_and_storage(
 
     let metrics = Arc::new(Metrics::new());
 
+    if let Some(ref info) = storage_info {
+        let reserved_bytes = info.total_reserved_gb.saturating_mul(1_073_741_824);
+        let available_bytes = info.available_gb.saturating_mul(1_073_741_824);
+        let used_bytes = info.used_gb.saturating_mul(1_073_741_824);
+        metrics.update_storage_metrics(reserved_bytes, available_bytes, used_bytes);
+    }
+
     let state = Arc::new(MeshState {
         seen_ids,
         deleted_ids,
@@ -722,8 +729,62 @@ pub async fn run_with_http_listen_and_storage(
         )),
         relay_url,
         data_dir: data_dir.clone(),
-        storage_info,
+        storage_info: storage_info.clone(),
     });
+
+    // ── Task Periódica: Atualização de Métricas de Storage (60s) ────────
+    if storage_info.is_some() {
+        if let Some(ref data_dir_buf) = state.data_dir {
+            let metrics_clone = metrics.clone();
+            let data_dir_clone = data_dir_buf.clone();
+            let extra_contribution_gb = storage_info
+                .as_ref()
+                .map(|i| {
+                    i.total_reserved_gb
+                        .saturating_sub(crate::storage::MIN_RESERVED_GB)
+                })
+                .unwrap_or(0);
+            let cancel_clone = cancel.clone();
+
+            tokio::spawn(async move {
+                let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+                interval.tick().await;
+
+                loop {
+                    tokio::select! {
+                        _ = cancel_clone.cancelled() => break,
+                        _ = interval.tick() => {
+                            let dir = data_dir_clone.clone();
+                            let storage_cfg = crate::storage::StorageConfig {
+                                extra_contribution_gb,
+                                data_dir: dir,
+                            };
+
+                            let metrics_res = tokio::task::spawn_blocking(move || {
+                                crate::storage::get_storage_metrics(&storage_cfg)
+                            }).await;
+
+                            match metrics_res {
+                                Ok(Ok(sm)) => {
+                                    metrics_clone.update_storage_metrics(
+                                        sm.reserved_bytes,
+                                        sm.available_bytes,
+                                        sm.used_bytes,
+                                    );
+                                }
+                                Ok(Err(err)) => {
+                                    warn!("⚠️ Erro ao atualizar métricas periódicas de storage: {err}");
+                                }
+                                Err(err) => {
+                                    warn!("⚠️ Task spawn_blocking de métricas de storage falhou: {err}");
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+        }
+    }
 
     // ── Node ID & Mesh URL Auto-detection ──────────────────────────────
     let node_id = load_or_generate_node_id(cfg.node_id.as_deref(), data_dir.as_deref());

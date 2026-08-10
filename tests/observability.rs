@@ -101,6 +101,9 @@ async fn test_observability_http_endpoints_end_to_end() -> anyhow::Result<()> {
         r#"goy_events_received_total{source="relay"} 1"#,
         "# TYPE goy_peers_connected gauge",
         "goy_peers_connected 0",
+        "# TYPE goy_storage_reserved_bytes gauge",
+        "# TYPE goy_storage_available_bytes gauge",
+        "# TYPE goy_storage_used_bytes gauge",
         "# TYPE goy_uptime_seconds gauge",
     ] {
         assert!(

@@ -129,12 +129,31 @@ async fn handle_connection(
         "/health" => {
             let peers = metrics.peers_connected();
             let uptime = metrics.uptime_seconds();
-            let (status, status_str) = if peers > 0 {
+            let available_bytes = metrics
+                .storage_available_bytes
+                .load(std::sync::atomic::Ordering::Relaxed);
+            let reserved_bytes = metrics
+                .storage_reserved_bytes
+                .load(std::sync::atomic::Ordering::Relaxed);
+            let used_bytes = metrics
+                .storage_used_bytes
+                .load(std::sync::atomic::Ordering::Relaxed);
+
+            // Threshold de 10% do mínimo de 50 GB (5 GB = 5_368_709_120 bytes)
+            let storage_threshold = 5_368_709_120u64;
+            let storage_degraded = available_bytes > 0 && available_bytes < storage_threshold;
+
+            let (status, status_str) = if peers > 0 && !storage_degraded {
                 (200u16, "ok")
             } else {
                 (503, "degraded")
             };
-            let body = format!(r#"{{"status":"{status_str}","peers":{peers},"uptime":{uptime}}}"#);
+
+            let storage_status = if storage_degraded { "degraded" } else { "ok" };
+
+            let body = format!(
+                r#"{{"status":"{status_str}","peers":{peers},"uptime":{uptime},"storage":{{"status":"{storage_status}","reserved_bytes":{reserved_bytes},"available_bytes":{available_bytes},"used_bytes":{used_bytes}}}}}"#
+            );
             (status, "application/json", body.into_bytes())
         }
         "/peers" => {
@@ -416,6 +435,45 @@ mod tests {
 
         let (status, _body) = http_get(&listen, "/admin").await?;
         assert_eq!(status, 404, "expected 404, got: {status}");
+
+        cancel.cancel();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_health_endpoint_reports_storage_degraded() -> anyhow::Result<()> {
+        let addr = free_addr().await?;
+        let listen = format!("127.0.0.1:{}", addr.port());
+        let metrics = Arc::new(Metrics::new());
+        metrics.set_peers_connected(2);
+        // Disponível: 1 GB (abaixo do threshold de 5 GB)
+        metrics.update_storage_metrics(161_061_273_600, 1_073_741_824, 500_000);
+
+        let node_info = NodeInfo {
+            version: "0.1.0-test".to_string(),
+            node_id: "node-test".to_string(),
+            cert_fingerprint: None,
+            relay_url: "ws://127.0.0.1:7777".to_string(),
+            mesh_listen: "0.0.0.0:8443".to_string(),
+            replication_factor: 3,
+            tls_enabled: false,
+        };
+        let cancel = CancellationToken::new();
+        let c = cancel.clone();
+        let l = listen.clone();
+        let m = metrics.clone();
+        let ni = node_info.clone();
+        tokio::spawn(async move {
+            let _ = run_http_server(l, m, ni, None, c).await;
+        });
+
+        let (status, body) = http_get(&listen, "/health").await?;
+        assert_eq!(
+            status, 503,
+            "expected 503 when storage degraded, got: {status}"
+        );
+        assert!(body.contains(r#""status":"degraded""#));
+        assert!(body.contains(r#""storage":{"status":"degraded""#));
 
         cancel.cancel();
         Ok(())

@@ -66,10 +66,14 @@ pub struct Metrics {
     /// peers conectados (gauge). Atualizado pelo MeshState quando um peer
     /// liga/desliga — não é derivado dos counters.
     pub peers_connected: AtomicU64,
-    /// Métricas de Consistent Hashing e Rebalanceamento.
+    /// Sessões de peers ativas com estatísticas de tráfego e metadados.
     pub hash_ring_peers: AtomicU64,
     pub hash_ring_vnodes: AtomicU64,
     pub rebalance_events_sent: AtomicU64,
+    /// Métricas de armazenamento reservado, disponível e utilizado (em bytes).
+    pub storage_reserved_bytes: AtomicU64,
+    pub storage_available_bytes: AtomicU64,
+    pub storage_used_bytes: AtomicU64,
     /// Instante de arranque do nó, para cálculo do gauge `goy_uptime_seconds`.
     pub started_at: Instant,
 }
@@ -96,8 +100,25 @@ impl Metrics {
             hash_ring_peers: AtomicU64::new(0),
             hash_ring_vnodes: AtomicU64::new(0),
             rebalance_events_sent: AtomicU64::new(0),
+            storage_reserved_bytes: AtomicU64::new(0),
+            storage_available_bytes: AtomicU64::new(0),
+            storage_used_bytes: AtomicU64::new(0),
             started_at: Instant::now(),
         }
+    }
+
+    /// Atualiza as métricas de armazenamento com os valores (em bytes).
+    pub fn update_storage_metrics(
+        &self,
+        reserved_bytes: u64,
+        available_bytes: u64,
+        used_bytes: u64,
+    ) {
+        self.storage_reserved_bytes
+            .store(reserved_bytes, Ordering::Relaxed);
+        self.storage_available_bytes
+            .store(available_bytes, Ordering::Relaxed);
+        self.storage_used_bytes.store(used_bytes, Ordering::Relaxed);
     }
 
     /// Incrementa `goy_events_received_total` (label `source=relay|peer`).
@@ -236,6 +257,28 @@ impl Metrics {
         s.push_str("# TYPE goy_rebalance_events_sent_total counter\n");
         s.push_str(&format!("goy_rebalance_events_sent_total {rebalanced}\n"));
 
+        // goy_storage_reserved_bytes
+        let storage_reserved = self.storage_reserved_bytes.load(Ordering::Relaxed);
+        s.push_str("# HELP goy_storage_reserved_bytes Total storage reserved for the mesh (minimum + voluntary contribution)\n");
+        s.push_str("# TYPE goy_storage_reserved_bytes gauge\n");
+        s.push_str(&format!("goy_storage_reserved_bytes {storage_reserved}\n"));
+
+        // goy_storage_available_bytes
+        let storage_available = self.storage_available_bytes.load(Ordering::Relaxed);
+        s.push_str(
+            "# HELP goy_storage_available_bytes Available space on the data directory filesystem\n",
+        );
+        s.push_str("# TYPE goy_storage_available_bytes gauge\n");
+        s.push_str(&format!(
+            "goy_storage_available_bytes {storage_available}\n"
+        ));
+
+        // goy_storage_used_bytes
+        let storage_used = self.storage_used_bytes.load(Ordering::Relaxed);
+        s.push_str("# HELP goy_storage_used_bytes Space used by Goy Node in the data directory\n");
+        s.push_str("# TYPE goy_storage_used_bytes gauge\n");
+        s.push_str(&format!("goy_storage_used_bytes {storage_used}\n"));
+
         // goy_uptime_seconds
         s.push_str("# HELP goy_uptime_seconds Seconds since the node process started.\n");
         s.push_str("# TYPE goy_uptime_seconds gauge\n");
@@ -262,6 +305,7 @@ mod tests {
         m.backfill_requests.fetch_add(1, Ordering::Relaxed);
         m.messages_oversized.fetch_add(4, Ordering::Relaxed);
         m.set_peers_connected(11);
+        m.update_storage_metrics(161_061_273_600, 251_327_098_880, 12_884_901_888);
 
         let out = m.render_prometheus();
 
@@ -280,6 +324,15 @@ mod tests {
             "goy_peers_connected 11",
             "goy_backfill_requests_total 1",
             "goy_messages_oversized_total 4",
+            "# HELP goy_storage_reserved_bytes Total storage reserved for the mesh (minimum + voluntary contribution)",
+            "# TYPE goy_storage_reserved_bytes gauge",
+            "goy_storage_reserved_bytes 161061273600",
+            "# HELP goy_storage_available_bytes Available space on the data directory filesystem",
+            "# TYPE goy_storage_available_bytes gauge",
+            "goy_storage_available_bytes 251327098880",
+            "# HELP goy_storage_used_bytes Space used by Goy Node in the data directory",
+            "# TYPE goy_storage_used_bytes gauge",
+            "goy_storage_used_bytes 12884901888",
             "# TYPE goy_uptime_seconds gauge",
         ] {
             assert!(
