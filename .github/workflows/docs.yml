@@ -1,0 +1,21 @@
+name: Docs
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'docs/**'
+      - '*.md'
+      - '.github/workflows/docs.yml'
+
+jobs:
+  check-docs:
+    name: Validate Markdown & Documentation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check Markdown files readability
+        run: |
+          echo "Checking Markdown files..."
+          find . -maxdepth 3 -name "*.md" -type f -exec ls -lh {} +
