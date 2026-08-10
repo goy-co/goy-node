@@ -177,13 +177,27 @@ pub fn select_replication_peers(
     let target_count = replication_factor - 1;
 
     let ring = state.hash_ring.read().unwrap();
-    let responsible = ring.get_responsible_peers(event_id, replication_factor);
+    let responsible = ring.get_responsible_peers(event_id, ring.peer_count());
 
-    responsible
+    let filtered: Vec<String> = responsible
         .into_iter()
         .filter(|p| source_peer.map_or(true, |src| src != p))
-        .take(target_count)
-        .collect()
+        .collect();
+
+    // Deduplica conexões para preferir outbound (ws:// ou wss://) sobre conexões inbound temporárias
+    let outbound: Vec<String> = filtered
+        .iter()
+        .filter(|p| p.starts_with("ws://") || p.starts_with("wss://"))
+        .cloned()
+        .collect();
+
+    let candidates = if !outbound.is_empty() {
+        outbound
+    } else {
+        filtered
+    };
+
+    candidates.into_iter().take(target_count).collect()
 }
 
 /// Encaminha o evento para `replication_factor - 1` peers selecionados pelo Consistent Hash Ring.

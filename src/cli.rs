@@ -51,6 +51,24 @@ pub enum Commands {
     Info,
     /// Exibe o dump das métricas Prometheus em formato texto
     Metrics,
+    /// Onboarding interativo/automatizado do nó na VPN e plataforma Goy Company
+    Onboard {
+        /// Chave de autenticação fornecida pela Goy Company (começa por gc_)
+        #[arg(long)]
+        auth_key: Option<String>,
+        /// Execução não-interativa (sem prompts, ideal para automação/CI)
+        #[arg(long)]
+        non_interactive: bool,
+        /// Configurar apenas a VPN, sem registar na API Goy Company
+        #[arg(long)]
+        vpn_only: bool,
+    },
+    /// Deregistar o nó da plataforma e desconectar da VPN
+    Offboard {
+        /// Confirmar remoção sem prompt de confirmação
+        #[arg(long)]
+        force: bool,
+    },
 }
 
 /// Executa o subcomando CLI especificado. Retorna `Ok(true)` se um subcomando de consulta
@@ -59,6 +77,34 @@ pub async fn handle_cli(cli: &Cli, metrics_listen: Option<&str>) -> anyhow::Resu
     let command = cli.command.as_ref().unwrap_or(&Commands::Run);
     if command == &Commands::Run {
         return Ok(false);
+    }
+
+    match command {
+        Commands::Onboard {
+            auth_key,
+            non_interactive,
+            vpn_only,
+        } => {
+            let code = crate::onboard::run_onboard(
+                auth_key.clone(),
+                *non_interactive,
+                *vpn_only,
+                cli.config.as_deref(),
+                cli.data_dir.as_deref(),
+            )
+            .await?;
+            std::process::exit(code);
+        }
+        Commands::Offboard { force } => {
+            let code = crate::onboard::run_offboard(
+                *force,
+                cli.config.as_deref(),
+                cli.data_dir.as_deref(),
+            )
+            .await?;
+            std::process::exit(code);
+        }
+        _ => {}
     }
 
     let listen_addr = metrics_listen.unwrap_or("127.0.0.1:9090");
@@ -72,7 +118,7 @@ pub async fn handle_cli(cli: &Cli, metrics_listen: Option<&str>) -> anyhow::Resu
         Commands::Peers => ("/peers", "peers"),
         Commands::Info => ("/info", "info"),
         Commands::Metrics => ("/metrics", "metrics"),
-        Commands::Run => unreachable!(),
+        _ => unreachable!(),
     };
 
     let url = format!("http://{listen_addr}{path}");

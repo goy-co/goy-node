@@ -16,9 +16,11 @@ mod cli;
 mod config;
 mod consistent_hash;
 mod event_types;
+mod goy_api;
 mod http;
 mod mesh;
 mod metrics;
+mod onboard;
 mod rate_limiter;
 mod registry;
 mod relay;
@@ -63,7 +65,7 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
-    // Tratar subcomandos de consulta (status, peers, info, metrics)
+    // Tratar subcomandos de consulta (status, peers, info, metrics, onboard, offboard)
     if cli::handle_cli(&cli, cfg.metrics.listen.as_deref()).await? {
         return Ok(());
     }
@@ -82,6 +84,13 @@ async fn cmd_run(
     info!("  Relay URL  : {}", cfg.relay.url);
     info!("  Listen addr: {}", cfg.mesh.listen);
     info!("  Data dir   : {}", data_dir.display());
+
+    // ── Verificação de Onboarding (Graceful Degradation) ───────────────
+    if onboard::check_onboard_status(Some(&data_dir)).is_none() {
+        tracing::warn!("⚠️ Node not onboarded. Run 'goy-node onboard' first to join Goy VPN platform.");
+    } else {
+        info!("✅ Node is onboarded on Goy VPN platform");
+    }
 
     // ── Graceful shutdown ──────────────────────────────────────────────
     let cancel = CancellationToken::new();
