@@ -10,12 +10,13 @@ CONFIG_DIR="/etc/goy-node"
 DATA_DIR="/var/lib/goy-node"
 SERVICE_NAME="goy-node"
 SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
+MACOS_PLIST_FILE="/Library/LaunchDaemons/com.goyco.goy-node.plist"
 DEFAULT_ENV_FILE="/etc/default/goy-node"
 SYSTEM_USER="goy-node"
 SYSTEM_GROUP="goy-node"
 
 # Funções de logging
-info() { echo -e "\031[34m[INFO]\033[0m $*"; }
+info() { echo -e "\033[34m[INFO]\033[0m $*"; }
 success() { echo -e "\033[32m[OK]\033[0m $*"; }
 warn() { echo -e "\033[33m[WARN]\033[0m $*"; }
 error() { echo -e "\033[31m[ERROR]\033[0m $*" >&2; exit 1; }
@@ -25,7 +26,7 @@ usage() {
 Uso: $0 [opções]
 
 Opções:
-  --install     Instala o binário, configura diretórios e ativa o serviço systemd (padrão)
+  --install     Instala o binário, configura diretórios e ativa o serviço (padrão)
   --uninstall   Para o serviço, desativa e remove os ficheiros instalados
   --build       Força a recompilação local com cargo em release antes de instalar
   --help        Exibe esta mensagem de ajuda
@@ -56,7 +57,14 @@ do_uninstall() {
     check_root
     info "A desinstalar o Goy Node..."
 
-    if command -v systemctl >/dev/null 2>&1 && [ -f "$SERVICE_FILE" ]; then
+    if [[ "$OSTYPE" == "darwin"* ]]; then
+        if [ -f "$MACOS_PLIST_FILE" ]; then
+            info "A parar e desativar serviço launchd..."
+            launchctl unload "$MACOS_PLIST_FILE" 2>/dev/null || true
+            rm -f "$MACOS_PLIST_FILE"
+            success "Serviço launchd removido."
+        fi
+    elif command -v systemctl >/dev/null 2>&1 && [ -f "$SERVICE_FILE" ]; then
         info "A parar e desativar serviço systemd..."
         systemctl stop "$SERVICE_NAME" || true
         systemctl disable "$SERVICE_NAME" || true
@@ -112,14 +120,31 @@ do_install() {
     success "Binário instalado em $INSTALL_BIN_DIR/goy-node."
 
     # 3. Criar Utilizador e Grupo de Sistema
-    if ! getent group "$SYSTEM_GROUP" >/dev/null 2>&1; then
-        info "A criar grupo de sistema $SYSTEM_GROUP..."
-        groupadd --system "$SYSTEM_GROUP"
-    fi
+    if [[ "$OSTYPE" == "darwin"* ]]; then
+        if ! dseditgroup -o read "$SYSTEM_GROUP" >/dev/null 2>&1; then
+            info "A criar grupo de sistema $SYSTEM_GROUP (macOS)..."
+            dseditgroup -o create "$SYSTEM_GROUP"
+        fi
 
-    if ! id -u "$SYSTEM_USER" >/dev/null 2>&1; then
-        info "A criar utilizador de sistema $SYSTEM_USER..."
-        useradd --system --gid "$SYSTEM_GROUP" --no-create-home --shell /bin/false "$SYSTEM_USER"
+        if ! id -u "$SYSTEM_USER" >/dev/null 2>&1; then
+            info "A criar utilizador de sistema $SYSTEM_USER (macOS)..."
+            dscl . -create "/Users/$SYSTEM_USER"
+            dscl . -create "/Users/$SYSTEM_USER" UserShell /usr/bin/false
+            dscl . -create "/Users/$SYSTEM_USER" RealName "Goy Node Service"
+            dscl . -create "/Users/$SYSTEM_USER" UniqueID 10001
+            dscl . -create "/Users/$SYSTEM_USER" PrimaryGroupID 10001
+            dscl . -create "/Users/$SYSTEM_USER" NFSHomeDirectory "$DATA_DIR"
+        fi
+    else
+        if ! getent group "$SYSTEM_GROUP" >/dev/null 2>&1; then
+            info "A criar grupo de sistema $SYSTEM_GROUP..."
+            groupadd --system "$SYSTEM_GROUP"
+        fi
+
+        if ! id -u "$SYSTEM_USER" >/dev/null 2>&1; then
+            info "A criar utilizador de sistema $SYSTEM_USER..."
+            useradd --system --gid "$SYSTEM_GROUP" --no-create-home --shell /bin/false "$SYSTEM_USER"
+        fi
     fi
 
     # 4. Criar Diretórios e Permissões
@@ -155,8 +180,48 @@ EOF
         success "Configuração inicial criada."
     fi
 
-    # 6. Instalar Serviço Systemd (se systemd estiver disponível)
-    if command -v systemctl >/dev/null 2>&1; then
+    # 6. Instalar Serviço (Systemd em Linux ou Launchd em macOS)
+    if [[ "$OSTYPE" == "darwin"* ]]; then
+        info "A instalar o serviço launchd no macOS ($MACOS_PLIST_FILE)..."
+        cat <<EOF > "$MACOS_PLIST_FILE"
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.goyco.goy-node</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>${INSTALL_BIN_DIR}/goy-node</string>
+        <string>run</string>
+        <string>--config</string>
+        <string>${CONFIG_DIR}/config.toml</string>
+        <string>--data-dir</string>
+        <string>${DATA_DIR}</string>
+    </array>
+    <key>UserName</key>
+    <string>${SYSTEM_USER}</string>
+    <key>GroupName</key>
+    <string>${SYSTEM_GROUP}</string>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+    <key>StandardOutPath</key>
+    <string>/var/log/goy-node.log</string>
+    <key>StandardErrorPath</key>
+    <string>/var/log/goy-node.err</string>
+</dict>
+</plist>
+EOF
+        chmod 644 "$MACOS_PLIST_FILE"
+        launchctl unload "$MACOS_PLIST_FILE" 2>/dev/null || true
+        launchctl load "$MACOS_PLIST_FILE"
+        success "Serviço launchd ativado e iniciado."
+    elif command -v systemctl >/dev/null 2>&1; then
         info "A instalar o serviço Systemd ($SERVICE_FILE)..."
         cp "$PROJECT_ROOT/deploy/goy-node.service" "$SERVICE_FILE"
         chmod 644 "$SERVICE_FILE"
@@ -171,7 +236,7 @@ EOF
         systemctl restart "$SERVICE_NAME"
         success "Serviço systemd $SERVICE_NAME ativado e iniciado."
     else
-        warn "Systemctl não encontrado. O serviço não foi registado no systemd."
+        warn "Systemctl não encontrado. O serviço não foi registado."
     fi
 
     # 7. Instruções Finais
@@ -179,12 +244,18 @@ EOF
     echo "=========================================================================="
     echo "🎉 Instalação do Goy Node concluída com sucesso!"
     echo "=========================================================================="
-    echo "  • Verificar estado do serviço : systemctl status goy-node"
-    echo "  • Verificar logs em tempo real: journalctl -u goy-node -f"
+    if [[ "$OSTYPE" == "darwin"* ]]; then
+        echo "  • Logs em tempo real        : tail -f /var/log/goy-node.log"
+        echo "  • Parar serviço             : launchctl unload $MACOS_PLIST_FILE"
+        echo "  • Iniciar serviço           : launchctl load $MACOS_PLIST_FILE"
+    else
+        echo "  • Verificar estado do serviço : systemctl status goy-node"
+        echo "  • Verificar logs em tempo real: journalctl -u goy-node -f"
+    fi
     echo "  • Executar Admin CLI         : goy-node status"
     echo "  • Listar peers conectados    : goy-node peers"
-    echo "  • Ficheiro de configuração   : /etc/goy-node/config.toml"
-    echo "  • Diretório de dados         : /var/lib/goy-node"
+    echo "  • Ficheiro de configuração   : $CONFIG_DIR/config.toml"
+    echo "  • Diretório de dados         : $DATA_DIR"
     echo "=========================================================================="
 }
 
