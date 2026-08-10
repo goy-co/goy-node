@@ -21,7 +21,7 @@ path = "src/main.rs"
 tokio = { version = "1", features = ["full", "signal"] }
 
 # WebSocket client/server (conexão com relay local + peers)
-tokio-tungstenite = { version = "0.24", features = ["native-tls"] }
+tokio-tungstenite = { version = "0.30", features = ["native-tls"] }
 
 # Serialização / protocolo Nostr
 serde = { version = "1", features = ["derive"] }
