@@ -2,8 +2,14 @@ Goy Source Available License (GSAL)
 
 Copyright © 2024-2026 The Goy Company. All rights reserved.
 
-Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the "Software"), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, and distribute copies of the Software for non-commercial purposes, internal business operations, testing, or development, subject to the following conditions:
+This software and associated documentation files (the "Software") are provided under a source-available terms model for public inspection and trust verification purposes only.
 
-1. The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.
-2. Commercial hosting or providing Goy Node as a managed cloud service to third parties requires an explicit commercial agreement with The Goy Company.
-3. THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+TERMS AND CONDITIONS:
+
+1. View-Only Permission: Permission is hereby granted to any person obtaining a copy of the Software solely to view, inspect, and audit the source code.
+2. Prohibited Uses: You may NOT copy, modify, merge, publish, distribute, sublicense, sell, perform, or contribute to copies of the Software, in whole or in part, for commercial or non-commercial purposes.
+3. No Redistribution / Contributions: External contributions, forks, pull requests, redistribution, or derivative works are strictly prohibited unless authorized under a separate explicit written agreement with The Goy Company.
+4. Attribution: The above copyright notice and this permission notice shall be retained in all copies or viewings of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
