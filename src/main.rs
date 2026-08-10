@@ -24,6 +24,7 @@ mod onboard;
 mod rate_limiter;
 mod registry;
 mod relay;
+mod storage;
 mod tls;
 
 #[tokio::main]
@@ -54,19 +55,22 @@ async fn main() -> anyhow::Result<()> {
         .or_else(|| std::env::var("GOY_NODE_CONFIG").map(PathBuf::from).ok())
         .unwrap_or_else(|| project_dirs.config_dir().join("config.toml"));
 
-    let data_dir = cli
-        .data_dir
-        .clone()
-        .or_else(|| std::env::var("GOY_NODE_DATA_DIR").map(PathBuf::from).ok())
-        .unwrap_or_else(|| project_dirs.data_dir().to_path_buf());
-
-    let cfg = match config::Config::load_or_generate(&config_path) {
+    let mut cfg = match config::Config::load_or_generate(&config_path) {
         Ok(c) => c,
         Err(e) => {
             eprintln!("❌ Configuration error: {e}");
             std::process::exit(1);
         }
     };
+
+    if let Some(ref cli_data_dir) = cli.data_dir {
+        info!(
+            "🔧 Override from CLI --data-dir: {}",
+            cli_data_dir.display()
+        );
+        cfg.storage.data_dir = cli_data_dir.clone();
+    }
+    let data_dir = cfg.storage.data_dir.clone();
 
     // Tratar subcomandos de consulta (status, peers, info, metrics, onboard, offboard)
     if cli::handle_cli(&cli, cfg.metrics.listen.as_deref()).await? {
@@ -88,7 +92,62 @@ async fn cmd_run(
     info!("  Listen addr: {}", cfg.mesh.listen);
     info!("  Data dir   : {}", data_dir.display());
 
-    // ── Verificação de Onboarding (Graceful Degradation) ───────────────
+    // ── 1. Verificação de Storage Reservado (Fail-Fast no Startup) ─────
+    let storage_info = match storage::verify_storage(&cfg.storage) {
+        Ok(info) => {
+            info!("💾 Storage verificado com sucesso");
+            info!(
+                "   Reservado: {} GB ({} GB mínimo + {} GB extra)",
+                info.total_reserved_gb,
+                storage::MIN_RESERVED_GB,
+                cfg.storage.extra_contribution_gb
+            );
+            info!(
+                "   Disponível: {} GB | Usado: {} GB",
+                info.available_gb, info.used_gb
+            );
+            info!("   Filesystem: {}", info.filesystem_path.display());
+            info
+        }
+        Err(err) => {
+            match &err {
+                storage::StorageError::InsufficientSpace {
+                    available_gb,
+                    required_gb,
+                } => {
+                    error!("❌ Espaço insuficiente para operação do Goy Node");
+                    error!(
+                        "   Disponível: {} GB | Requerido: {} GB (mínimo obrigatório)",
+                        available_gb, required_gb
+                    );
+                    error!("   Data dir: {}", cfg.storage.data_dir.display());
+                    error!("");
+                    error!("   O Goy Node requer pelo menos 50 GB de espaço reservado");
+                    error!("   para garantir redundância de dados na rede Goy.");
+                    error!("");
+                    error!("   Ações possíveis:");
+                    error!("   • Libertar espaço em disco");
+                    error!("   • Escolher outro data_dir com espaço suficiente (--data-dir)");
+                    error!("   • Montar volume adicional no data_dir atual");
+                }
+                storage::StorageError::PermissionDenied(path) => {
+                    error!("❌ Permissão negada no diretório de dados");
+                    error!("   Data dir: {}", path.display());
+                    error!("   Verifique as permissões de leitura e escrita do utilizador.");
+                }
+                storage::StorageError::DataDirNotFound(path) => {
+                    error!("❌ Não foi possível criar o diretório de dados");
+                    error!("   Data dir: {}", path.display());
+                }
+                storage::StorageError::FilesystemError(msg) => {
+                    error!("❌ Erro no sistema de ficheiros: {msg}");
+                }
+            }
+            std::process::exit(storage::EXIT_STORAGE_ERROR);
+        }
+    };
+
+    // ── 2. Verificação de Onboarding (Graceful Degradation) ───────────
     if onboard::check_onboard_status(Some(&data_dir)).is_none() {
         tracing::warn!(
             "⚠️ Node not onboarded. Run 'goy-node onboard' first to join Goy VPN platform."
@@ -117,11 +176,12 @@ async fn cmd_run(
     info!("✔ Relay connection started");
 
     // ── Mesh Agent ─────────────────────────────────────────────────────
-    let mesh_handle = tokio::spawn(mesh::run_with_http_listen(
+    let mesh_handle = tokio::spawn(mesh::run_with_http_listen_and_storage(
         cfg.mesh,
         cfg.metrics.listen,
         cfg.relay.url.clone(),
         Some(data_dir),
+        Some(storage_info),
         relay_events,
         relay_publisher,
         cancel.clone(),

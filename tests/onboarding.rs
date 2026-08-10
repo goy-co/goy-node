@@ -21,7 +21,9 @@ async fn test_onboard_non_interactive_vpn_only_flow() -> anyhow::Result<()> {
         .output()
         .is_err()
     {
-        eprintln!("⏭️  Skipping test_onboard_non_interactive_vpn_only_flow: tailscale CLI not available");
+        eprintln!(
+            "⏭️  Skipping test_onboard_non_interactive_vpn_only_flow: tailscale CLI not available"
+        );
         return Ok(());
     }
 

@@ -145,6 +145,9 @@ pub struct MeshState {
     pub relay_url: String,
     /// Diretório para persistência de estado em disco (opcional).
     pub data_dir: Option<PathBuf>,
+    /// Informações de armazenamento do nó verificado no arranque.
+    #[allow(dead_code)]
+    pub storage_info: Option<crate::storage::StorageInfo>,
 }
 
 impl MeshState {
@@ -660,6 +663,31 @@ pub async fn run_with_http_listen(
     metrics_listen: Option<String>,
     relay_url: String,
     data_dir: Option<PathBuf>,
+    relay_events: broadcast::Receiver<RelayEvent>,
+    relay_publish_tx: mpsc::Sender<String>,
+    cancel: CancellationToken,
+) -> anyhow::Result<()> {
+    run_with_http_listen_and_storage(
+        cfg,
+        metrics_listen,
+        relay_url,
+        data_dir,
+        None,
+        relay_events,
+        relay_publish_tx,
+        cancel,
+    )
+    .await
+}
+
+/// Inicia o mesh agent com suporte a servidor HTTP de métricas e estado de storage verificado.
+#[allow(clippy::too_many_arguments)]
+pub async fn run_with_http_listen_and_storage(
+    cfg: MeshConfig,
+    metrics_listen: Option<String>,
+    relay_url: String,
+    data_dir: Option<PathBuf>,
+    storage_info: Option<crate::storage::StorageInfo>,
     mut relay_events: broadcast::Receiver<RelayEvent>,
     relay_publish_tx: mpsc::Sender<String>,
     cancel: CancellationToken,
@@ -694,6 +722,7 @@ pub async fn run_with_http_listen(
         )),
         relay_url,
         data_dir: data_dir.clone(),
+        storage_info,
     });
 
     // ── Node ID & Mesh URL Auto-detection ──────────────────────────────
@@ -2547,6 +2576,7 @@ mod tests {
             )),
             relay_url: "ws://127.0.0.1:7777".to_string(),
             data_dir: None,
+            storage_info: None,
         }
     }
 
