@@ -11,6 +11,9 @@ use tracing::{error, info, warn};
 use crate::config::DEFAULT_CONFIG_TEMPLATE;
 use crate::goy_api::{GoyApiClient, validate_auth_key};
 
+/// Código de saída do processo (exit code 5) quando ocorre falha de armazenamento durante o onboarding.
+pub const EXIT_ONBOARD_STORAGE_ERROR: i32 = 5;
+
 /// Estado persistido de onboarding (`data_dir/onboard_state.json`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OnboardState {
@@ -107,7 +110,96 @@ pub async fn run_onboard(
         return Ok(2);
     }
 
-    // 2. Registar na API da Goy Company (se não for vpn_only)
+    // 2. Garantir diretórios de dados e verificar storage (Fail-Fast local antes de API/VPN)
+    let target_data_dir = data_dir
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| PathBuf::from("./data"));
+    let _ = fs::create_dir_all(&target_data_dir);
+
+    let cfg_file_path = config_path
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| PathBuf::from("config.toml"));
+
+    let extra_contribution_gb = if cfg_file_path.exists() {
+        if let Ok(content) = fs::read_to_string(&cfg_file_path) {
+            if let Ok(cfg) = toml::from_str::<crate::config::Config>(&content) {
+                cfg.storage.extra_contribution_gb
+            } else {
+                0
+            }
+        } else {
+            0
+        }
+    } else {
+        0
+    };
+
+    let storage_cfg = crate::storage::StorageConfig {
+        extra_contribution_gb,
+        data_dir: target_data_dir.clone(),
+    };
+
+    match crate::storage::verify_storage(&storage_cfg) {
+        Ok(info) => {
+            println!("🔍 A verificar requisitos de storage...");
+            println!("   Disco disponível: {} GB", info.available_gb);
+            println!(
+                "   Mínimo requerido: {} GB ✅",
+                crate::storage::MIN_RESERVED_GB
+            );
+            if extra_contribution_gb > 0 {
+                println!("   Contribuição extra: {extra_contribution_gb} GB");
+            }
+            println!("   Total reservado: {} GB ✅", info.total_reserved_gb);
+        }
+        Err(err) => {
+            eprintln!("🔍 A verificar requisitos de storage...");
+            match &err {
+                crate::storage::StorageError::InsufficientSpace {
+                    available_gb,
+                    required_gb,
+                } => {
+                    eprintln!("   Disco disponível: {available_gb} GB");
+                    eprintln!("   Mínimo requerido: {required_gb} GB ❌");
+                    eprintln!();
+                    eprintln!("❌ Espaço insuficiente para operar o Goy Node.");
+                    eprintln!();
+                    eprintln!("   O Goy Node requer pelo menos 50 GB de espaço reservado");
+                    eprintln!("   para garantir redundância de dados na rede Goy.");
+                    eprintln!();
+                    eprintln!("   Ações possíveis:");
+                    eprintln!("   • Libertar espaço em disco");
+                    eprintln!("   • Escolher outro data_dir (--data-dir /caminho/com/espaco)");
+                    eprintln!("   • Montar volume adicional no data_dir atual");
+                }
+                crate::storage::StorageError::PermissionDenied(path) => {
+                    eprintln!("   Data dir: {} ❌", path.display());
+                    eprintln!();
+                    eprintln!("❌ Permissão negada ao aceder ou escrever no diretório de dados.");
+                    eprintln!("   Verifique as permissões de leitura/escrita do utilizador.");
+                }
+                crate::storage::StorageError::DataDirNotFound(path) => {
+                    eprintln!("   Data dir: {} ❌", path.display());
+                    eprintln!();
+                    eprintln!("❌ Não foi possível encontrar ou criar o diretório de dados.");
+                }
+                crate::storage::StorageError::FilesystemError(msg) => {
+                    eprintln!();
+                    eprintln!("❌ Erro no sistema de ficheiros: {msg}");
+                }
+            }
+            if target_data_dir.exists() {
+                eprintln!();
+                eprintln!(
+                    "ℹ️  O diretório '{}' foi mantido sem ficheiros de estado e pode ser removido manualmente.",
+                    target_data_dir.display()
+                );
+            }
+            return Ok(EXIT_ONBOARD_STORAGE_ERROR);
+        }
+    }
+
+    // 3. Registar na API da Goy Company (se não for vpn_only)
     let node_id = uuid::Uuid::new_v4().to_string();
     let api_url = std::env::var("GOY_API_URL").ok();
     let api_client = GoyApiClient::new(api_url.as_deref());
@@ -192,12 +284,6 @@ pub async fn run_onboard(
         }
     };
 
-    // Garantir criação do data_dir e gravação de estados
-    let target_data_dir = data_dir
-        .map(|p| p.to_path_buf())
-        .unwrap_or_else(|| PathBuf::from("./data"));
-    fs::create_dir_all(&target_data_dir)?;
-
     // Gravar node_id.txt
     fs::write(target_data_dir.join("node_id.txt"), &registered_node_id)?;
 
@@ -238,9 +324,6 @@ pub async fn run_onboard(
     )?;
 
     // Escrever config.toml se não existir ou atualizar mesh_url
-    let cfg_file_path = config_path
-        .map(|p| p.to_path_buf())
-        .unwrap_or_else(|| PathBuf::from("config.toml"));
 
     let config_content = if cfg_file_path.exists() {
         let existing = fs::read_to_string(&cfg_file_path)?;

@@ -142,3 +142,65 @@ async fn test_offboard_cleans_state_files() -> anyhow::Result<()> {
 
     Ok(())
 }
+
+#[tokio::test]
+async fn test_onboard_storage_verification_failure_returns_code_5() -> anyhow::Result<()> {
+    let invalid_dir = std::path::PathBuf::from("/proc/impossible_dir_goy_test");
+    let config_path = std::path::PathBuf::from("/tmp/config_test.toml");
+
+    let code = run_onboard(
+        Some("gc_valid_test_auth_key_12345".to_string()),
+        true,  // non-interactive
+        false, // vpn_only
+        Some(&config_path),
+        Some(&invalid_dir),
+    )
+    .await?;
+
+    assert_eq!(
+        code,
+        goy_node::onboard::EXIT_ONBOARD_STORAGE_ERROR,
+        "Storage failure must return exit code 5"
+    );
+    assert!(!invalid_dir.join("onboard_state.json").exists());
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_onboard_storage_failure_preserves_data_dir_structure() -> anyhow::Result<()> {
+    let dir = tempdir()?;
+    let data_dir = dir.path().join("data_onboard_storage_fail");
+
+    // Forçar falha de escrita tornando o diretório read-only após a sua criação
+    std::fs::create_dir_all(&data_dir)?;
+    let mut perms = std::fs::metadata(&data_dir)?.permissions();
+    perms.set_readonly(true);
+    let _ = std::fs::set_permissions(&data_dir, perms.clone());
+
+    let code = run_onboard(
+        Some("gc_valid_test_auth_key_12345".to_string()),
+        true,
+        false,
+        None,
+        Some(&data_dir),
+    )
+    .await?;
+
+    // Restaurar permissões para permitir limpeza do tempdir
+    perms.set_readonly(false);
+    let _ = std::fs::set_permissions(&data_dir, perms);
+
+    assert_eq!(
+        code,
+        goy_node::onboard::EXIT_ONBOARD_STORAGE_ERROR,
+        "Read-only storage failure must return exit code 5"
+    );
+    assert!(data_dir.exists(), "Created directory must be preserved");
+    assert!(
+        !data_dir.join("onboard_state.json").exists(),
+        "State file must NOT be written when storage fails"
+    );
+
+    Ok(())
+}
