@@ -45,7 +45,7 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     // ── Configuração ───────────────────────────────────────────────────
-    let project_dirs = ProjectDirs::from("com", "the-goy-company", "goy-node")
+    let project_dirs = ProjectDirs::from("com", "goy-co", "goy-node")
         .expect("failed to determine project directories");
 
     let config_path = cli

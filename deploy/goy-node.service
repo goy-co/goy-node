@@ -1,6 +1,6 @@
 [Unit]
 Description=Goy Node — Automatic Nostr relay mesh agent over VPN
-Documentation=https://github.com/the-goy-company/goy-node
+Documentation=https://github.com/goy-co/goy-node
 Wants=network-online.target
 After=network-online.target
 

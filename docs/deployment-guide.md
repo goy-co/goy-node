@@ -9,7 +9,7 @@ Comprehensive guide for deploying, configuring, operating, and troubleshooting G
 ### Method A: Automated Shell Installer (Linux & macOS)
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/the-goy-company/goy-node/main/deploy/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/goy-co/goy-node/main/deploy/install.sh | bash
 ```
 
 ### Method B: Docker & Docker Compose

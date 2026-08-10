@@ -147,7 +147,7 @@ do_install() {
         fi
     else
         ARCH="$(get_release_arch)"
-        RELEASE_URL="https://github.com/the-goy-company/node/releases/download/${GOY_NODE_VERSION}/goy-node-${GOY_NODE_VERSION}-${ARCH}.tar.gz"
+        RELEASE_URL="https://github.com/goy-co/goy-node/releases/download/${GOY_NODE_VERSION}/goy-node-${GOY_NODE_VERSION}-${ARCH}.tar.gz"
         info "A descarregar binário ${ARCH} da release ${GOY_NODE_VERSION}..."
 
         TMP_DIR=$(mktemp -d)

@@ -1,8 +1,8 @@
 # Goy Node — Mesh Agent for Nostr Relays over Tailscale / Headscale VPN
 
-[![CI Status](https://github.com/the-goy-company/goy-node/actions/workflows/ci.yml/badge.svg)](https://github.com/the-goy-company/goy-node/actions/workflows/ci.yml)
-[![CodeQL](https://github.com/the-goy-company/goy-node/actions/workflows/codeql.yml/badge.svg)](https://github.com/the-goy-company/goy-node/actions/workflows/codeql.yml)
-[![Release](https://img.shields.io/github/v/release/the-goy-company/goy-node?color=blue)](https://github.com/the-goy-company/goy-node/releases)
+[![CI Status](https://github.com/goy-co/goy-node/actions/workflows/ci.yml/badge.svg)](https://github.com/goy-co/goy-node/actions/workflows/ci.yml)
+[![CodeQL](https://github.com/goy-co/goy-node/actions/workflows/codeql.yml/badge.svg)](https://github.com/goy-co/goy-node/actions/workflows/codeql.yml)
+[![Release](https://img.shields.io/github/v/release/goy-co/goy-node?color=blue)](https://github.com/goy-co/goy-node/releases)
 [![License](https://img.shields.io/badge/license-Proprietary-orange.svg)](LICENSE)
 
 **Goy Node** is an enterprise-grade, zero-configuration mesh agent built in Rust that connects local Nostr relays (such as [strfry](https://github.com/hoytech/strfry)) into a peer-to-peer, encrypted, N-of-M replicated mesh over private VPN networks.
@@ -13,7 +13,7 @@
 
 ```bash
 # 1. Install Goy Node on Linux or macOS
-curl -fsSL https://raw.githubusercontent.com/the-goy-company/goy-node/main/deploy/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/goy-co/goy-node/main/deploy/install.sh | bash
 
 # 2. Onboard your node into the Goy VPN Network using your Auth Key
 goy-node onboard --auth-key gc_your_company_auth_key_here

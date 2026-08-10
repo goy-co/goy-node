@@ -5,7 +5,7 @@ edition = "2024"
 authors = ["The Goy Company"]
 description = "Mesh agent for Goy Node — automatic Nostr relay synchronization"
 license = "Proprietary"
-repository = "https://github.com/the-goy-company/goy-node"
+repository = "https://github.com/goy-co/goy-node"
 
 [lib]
 name = "goy_node"
