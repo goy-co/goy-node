@@ -788,6 +788,7 @@ dependencies = [
  "directories",
  "futures-util",
  "hex",
+ "libc",
  "nostr",
  "rcgen",
  "reqwest",

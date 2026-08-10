@@ -1,8 +1,10 @@
 use std::net::SocketAddr;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
+
+use crate::storage::StorageConfig;
 
 pub const DEFAULT_CONFIG_TEMPLATE: &str = r#"# =====================================================================
 # Goy Node Configuration
@@ -35,21 +37,34 @@ tls_enabled = true
 # [mesh.trusted_fingerprints]
 # "ws://peer1:8443" = "a1b2c3..."
 
+[storage]
+# Diretório de dados do nó onde residem chaves, certificados e estado persistente.
+data_dir = "/var/lib/goy-node"
+
+# Espaço de armazenamento adicional voluntário em GB acima do mínimo obrigatório (50 GB hardcoded).
+# O nó reserva automaticamente um mínimo obrigatório de 50 GB para garantir redundância no mesh.
+# Exemplos de contribuição voluntária:
+#   - Operador individual / nó doméstico: 0 a 50 GB extra
+#   - Organização / servidor dedicado:   100 a 200 GB extra
+extra_contribution_gb = 0
+
 [metrics]
 # Endereço e porta onde o servidor HTTP de observabilidade escuta (apenas localhost).
 # Definir como "" ou "off" para desativar.
 listen = "127.0.0.1:9090"
 "#;
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     pub relay: RelayConfig,
     pub mesh: MeshConfig,
     #[serde(default)]
     pub metrics: MetricsConfig,
+    #[serde(default)]
+    pub storage: StorageConfig,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RelayConfig {
     /// WebSocket URL do relay local (strfry)
     pub url: String,
@@ -57,7 +72,7 @@ pub struct RelayConfig {
     pub import_cmd: Option<String>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MeshConfig {
     /// Endereço onde o mesh agent escuta peers
     pub listen: String,
@@ -100,7 +115,7 @@ pub struct MeshConfig {
     pub trusted_fingerprints: std::collections::HashMap<String, String>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MetricsConfig {
     /// Endereço onde o servidor HTTP de métricas escuta (ex: "127.0.0.1:9090").
     /// `None` desativa o servidor HTTP.
@@ -300,10 +315,40 @@ impl Config {
                 self.metrics.listen = Some(trimmed.to_string());
             }
         }
+
+        if let Ok(v_raw) = std::env::var("GOY_NODE_EXTRA_STORAGE_GB") {
+            match v_raw.trim().parse::<u64>() {
+                Ok(val) => {
+                    let old_val = self.storage.extra_contribution_gb;
+                    info!("🔧 Override from env GOY_NODE_EXTRA_STORAGE_GB: {old_val} -> {val}");
+                    self.storage.extra_contribution_gb = val;
+                }
+                Err(_) => {
+                    warn!(
+                        "⚠️  Valor inválido para env GOY_NODE_EXTRA_STORAGE_GB: '{v_raw}'. A utilizar valor default ({})",
+                        self.storage.extra_contribution_gb
+                    );
+                }
+            }
+        }
+
+        if let Ok(dir_raw) = std::env::var("GOY_NODE_DATA_DIR") {
+            let trimmed = dir_raw.trim();
+            if !trimmed.is_empty() {
+                let old_dir = self.storage.data_dir.clone();
+                let new_dir = PathBuf::from(trimmed);
+                info!(
+                    "🔧 Override from env GOY_NODE_DATA_DIR: {} -> {}",
+                    old_dir.display(),
+                    new_dir.display()
+                );
+                self.storage.data_dir = new_dir;
+            }
+        }
     }
 
     /// Valida rigorosamente todos os campos da configuração.
-    pub fn validate(&self) -> anyhow::Result<()> {
+    pub fn validate(&mut self) -> anyhow::Result<()> {
         // 1. Valida relay.url
         if !self.relay.url.starts_with("ws://") && !self.relay.url.starts_with("wss://") {
             anyhow::bail!(
@@ -372,6 +417,26 @@ impl Config {
             );
         }
 
+        // 8. Validação básica de sanidade do storage
+        if self.storage.extra_contribution_gb > 10_240 {
+            warn!(
+                "⚠️  storage.extra_contribution_gb ({}) excede o limite de sanidade de 10 TB (10240 GB). Verifique se os valores estão corretos.",
+                self.storage.extra_contribution_gb
+            );
+        }
+
+        if self.storage.data_dir.is_relative()
+            && let Ok(current_dir) = std::env::current_dir()
+        {
+            let abs_path = current_dir.join(&self.storage.data_dir);
+            info!(
+                "ℹ️  storage.data_dir relativo '{}' resolvido para caminho absoluto '{}'",
+                self.storage.data_dir.display(),
+                abs_path.display()
+            );
+            self.storage.data_dir = abs_path;
+        }
+
         Ok(())
     }
 }
@@ -406,6 +471,7 @@ impl Default for Config {
             },
             mesh: MeshConfig::default(),
             metrics: MetricsConfig::default(),
+            storage: StorageConfig::default(),
         }
     }
 }
@@ -623,5 +689,100 @@ mod tests {
             std::env::remove_var("GOY_NODE_ID");
             std::env::remove_var("GOY_NODE_REPLICATION_FACTOR");
         }
+    }
+
+    #[test]
+    fn test_legacy_config_without_storage_section() -> anyhow::Result<()> {
+        let legacy_toml = r#"
+[relay]
+url = "ws://127.0.0.1:7777"
+
+[mesh]
+listen = "0.0.0.0:8443"
+"#;
+        let mut cfg = Config::load_from_str(legacy_toml)?;
+        assert_eq!(cfg.storage.extra_contribution_gb, 0);
+        assert_eq!(cfg.storage.data_dir, PathBuf::from("/var/lib/goy-node"));
+        assert!(cfg.validate().is_ok());
+        Ok(())
+    }
+
+    #[test]
+    fn test_storage_config_parsing() -> anyhow::Result<()> {
+        let toml_str = r#"
+[relay]
+url = "ws://127.0.0.1:7777"
+
+[mesh]
+listen = "0.0.0.0:8443"
+
+[storage]
+extra_contribution_gb = 100
+data_dir = "/var/lib/custom-goy"
+"#;
+        let mut cfg = Config::load_from_str(toml_str)?;
+        assert_eq!(cfg.storage.extra_contribution_gb, 100);
+        assert_eq!(cfg.storage.data_dir, PathBuf::from("/var/lib/custom-goy"));
+        assert!(cfg.validate().is_ok());
+        Ok(())
+    }
+
+    #[test]
+    fn test_storage_env_overrides() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        unsafe {
+            std::env::set_var("GOY_NODE_EXTRA_STORAGE_GB", "250");
+            std::env::set_var("GOY_NODE_DATA_DIR", "/data/env/override");
+        }
+
+        let mut cfg = Config::default();
+        cfg.apply_env_overrides();
+
+        assert_eq!(cfg.storage.extra_contribution_gb, 250);
+        assert_eq!(cfg.storage.data_dir, PathBuf::from("/data/env/override"));
+
+        unsafe {
+            std::env::remove_var("GOY_NODE_EXTRA_STORAGE_GB");
+            std::env::remove_var("GOY_NODE_DATA_DIR");
+        }
+    }
+
+    #[test]
+    fn test_storage_env_override_invalid_number_warning() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        unsafe {
+            std::env::set_var("GOY_NODE_EXTRA_STORAGE_GB", "not_a_number");
+        }
+
+        let mut cfg = Config::default();
+        cfg.apply_env_overrides();
+
+        // Must keep default and not panic
+        assert_eq!(cfg.storage.extra_contribution_gb, 0);
+
+        unsafe {
+            std::env::remove_var("GOY_NODE_EXTRA_STORAGE_GB");
+        }
+    }
+
+    #[test]
+    fn test_storage_validation_sanity_check_warning() -> anyhow::Result<()> {
+        let mut cfg = Config::default();
+        cfg.storage.extra_contribution_gb = 20_000; // > 10 TB
+        assert!(cfg.validate().is_ok());
+        Ok(())
+    }
+
+    #[test]
+    fn test_storage_validation_relative_data_dir() -> anyhow::Result<()> {
+        let mut cfg = Config::default();
+        cfg.storage.data_dir = PathBuf::from("my_relative_data");
+        assert!(cfg.storage.data_dir.is_relative());
+
+        cfg.validate()?;
+
+        assert!(cfg.storage.data_dir.is_absolute());
+        assert!(cfg.storage.data_dir.ends_with("my_relative_data"));
+        Ok(())
     }
 }

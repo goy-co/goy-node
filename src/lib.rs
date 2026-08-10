@@ -10,4 +10,5 @@ pub mod onboard;
 pub mod rate_limiter;
 pub mod registry;
 pub mod relay;
+pub mod storage;
 pub mod tls;
