@@ -69,6 +69,44 @@ impl TlsContext {
     }
 }
 
+/// Informações ativas e estatísticas de tráfego de um peer conectado.
+#[derive(Debug, Clone)]
+pub struct PeerSessionInfo {
+    pub peer_id: String,
+    pub address: String,
+    pub direction: String,
+    pub connected_since: u64,
+    pub events_sent: Arc<AtomicU64>,
+    pub events_received: Arc<AtomicU64>,
+    pub tls_fingerprint: Option<String>,
+}
+
+/// Estrutura para serialização JSON da rota `GET /peers`.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct PeerSessionView {
+    pub peer_id: String,
+    pub address: String,
+    pub direction: String,
+    pub connected_since: u64,
+    pub events_sent: u64,
+    pub events_received: u64,
+    pub tls_fingerprint: Option<String>,
+}
+
+impl PeerSessionInfo {
+    pub fn to_view(&self) -> PeerSessionView {
+        PeerSessionView {
+            peer_id: self.peer_id.clone(),
+            address: self.address.clone(),
+            direction: self.direction.clone(),
+            connected_since: self.connected_since,
+            events_sent: self.events_sent.load(Ordering::Relaxed),
+            events_received: self.events_received.load(Ordering::Relaxed),
+            tls_fingerprint: self.tls_fingerprint.clone(),
+        }
+    }
+}
+
 /// Estado compartilhado entre todas as tarefas do mesh agent.
 pub struct MeshState {
     /// Event IDs já vistos (dedup global).
@@ -105,10 +143,25 @@ pub struct MeshState {
     pub messages_oversized: AtomicU64,
     /// Struct de métricas Prometheus partilhado com o servidor HTTP.
     pub metrics: Arc<Metrics>,
+    /// Sessões de peers ativas com estatísticas de tráfego e metadados.
+    pub active_peer_sessions: DashMap<String, Arc<PeerSessionInfo>>,
     /// WebSocket URL do relay local para consultas de backfill.
     pub relay_url: String,
     /// Diretório para persistência de estado em disco (opcional).
     pub data_dir: Option<PathBuf>,
+}
+
+impl MeshState {
+    /// Retorna a lista de visões serializáveis das sessões de peers ativas.
+    pub fn get_peer_sessions(&self) -> Vec<PeerSessionView> {
+        let mut vec: Vec<PeerSessionView> = self
+            .active_peer_sessions
+            .iter()
+            .map(|r| r.value().to_view())
+            .collect();
+        vec.sort_by(|a, b| a.peer_id.cmp(&b.peer_id));
+        vec
+    }
 }
 
 /// Seleciona deterministicamente os peers para replicação de um evento Nostr com base no event ID.
@@ -192,6 +245,9 @@ pub fn replicate_event(
             if tx.value().try_send(msg.clone()).is_ok() {
                 state.events_replicated.fetch_add(1, Ordering::Relaxed);
                 state.metrics.events_replicated.fetch_add(1, Ordering::Relaxed);
+                if let Some(session) = state.active_peer_sessions.get(&target) {
+                    session.events_sent.fetch_add(1, Ordering::Relaxed);
+                }
             }
         }
     }
@@ -493,6 +549,7 @@ impl Drop for PeerGuard {
         self.state.connected_peers.remove(&self.peer_id);
         self.state.peer_channels.remove(&self.peer_id);
         self.state.rate_limiters.remove(&self.peer_id);
+        self.state.active_peer_sessions.remove(&self.peer_id);
         self.state.metrics.dec_peers_connected();
     }
 }
@@ -584,6 +641,7 @@ pub async fn run_with_http_listen(
         bytes_rate_limited: AtomicU64::new(0),
         messages_oversized: AtomicU64::new(0),
         metrics: metrics.clone(),
+        active_peer_sessions: DashMap::new(),
         relay_url,
         data_dir: data_dir.clone(),
     });
@@ -604,7 +662,7 @@ pub async fn run_with_http_listen(
     };
     let cert_fingerprint = tls_ctx.as_ref().map(|c| c.cert.fingerprint.clone());
 
-    // ── Servidor HTTP de Observabilidade (Prometheus + Health) ─────────
+    // ── Servidor HTTP de Observabilidade (Prometheus + Health + Peers) ─
     if let Some(listen_addr) = metrics_listen {
         let node_info = crate::http::NodeInfo {
             version: env!("CARGO_PKG_VERSION").to_string(),
@@ -617,8 +675,9 @@ pub async fn run_with_http_listen(
         };
         let m = metrics.clone();
         let c = cancel.clone();
+        let st = state.clone();
         tokio::spawn(async move {
-            if let Err(e) = crate::http::run_http_server(listen_addr, m, node_info, c).await {
+            if let Err(e) = crate::http::run_http_server(listen_addr, m, node_info, Some(st), c).await {
                 error!("❌ HTTP observability server failed: {e}");
             }
         });
@@ -1139,6 +1198,26 @@ async fn handle_peer_stream<Si, St>(
 
     state.peer_channels.insert(peer_id.clone(), ctrl_tx.clone());
 
+    let (direction, address) = if peer_id.starts_with("inbound:") {
+        ("inbound".to_string(), peer_id.trim_start_matches("inbound:").to_string())
+    } else {
+        let addr = parse_ws_host_port(&peer_id)
+            .map(|(h, p)| format!("{h}:{p}"))
+            .unwrap_or_else(|_| peer_id.clone());
+        ("outbound".to_string(), addr)
+    };
+
+    let session_info = Arc::new(PeerSessionInfo {
+        peer_id: peer_id.clone(),
+        address,
+        direction,
+        connected_since: chrono::Utc::now().timestamp() as u64,
+        events_sent: Arc::new(AtomicU64::new(0)),
+        events_received: Arc::new(AtomicU64::new(0)),
+        tls_fingerprint: None,
+    });
+    state.active_peer_sessions.insert(peer_id.clone(), session_info);
+
     let _guard = PeerGuard {
         state: state.clone(),
         peer_id: peer_id.clone(),
@@ -1256,6 +1335,9 @@ async fn handle_peer_stream<Si, St>(
                             }
                         } else if text.starts_with(r#"["EVENT""#) {
                             state.metrics.inc_events_received(EventSource::Peer);
+                            if let Some(session) = state.active_peer_sessions.get(&peer_id) {
+                                session.events_received.fetch_add(1, Ordering::Relaxed);
+                            }
                             if let Some(id) = extract_event_id(&text) {
                                 if let Some(ts) = extract_event_timestamp(&text) {
                                     state
@@ -2149,6 +2231,7 @@ mod tests {
             bytes_rate_limited: AtomicU64::new(0),
             messages_oversized: AtomicU64::new(0),
             metrics: Arc::new(Metrics::new()),
+            active_peer_sessions: DashMap::new(),
             relay_url: "ws://127.0.0.1:7777".to_string(),
             data_dir: None,
         }

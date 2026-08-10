@@ -12,6 +12,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{error, info};
 use tracing_subscriber::{EnvFilter, fmt};
 
+mod cli;
 mod config;
 mod event_types;
 mod http;
@@ -22,37 +23,20 @@ mod registry;
 mod relay;
 mod tls;
 
-/// Opções CLI para o Goy Node
-#[derive(Parser, Debug)]
-#[command(
-    name = "goy-node",
-    version = env!("CARGO_PKG_VERSION"),
-    author = "The Goy Company",
-    about = "Mesh agent for Goy Node — automatic Nostr relay synchronization"
-)]
-struct Cli {
-    /// Caminho alternativo para o ficheiro de configuração config.toml
-    #[arg(short, long, value_name = "PATH")]
-    config: Option<PathBuf>,
-
-    /// Caminho alternativo para o diretório de dados (seen_ids, peer_cursors)
-    #[arg(short, long, value_name = "PATH")]
-    data_dir: Option<PathBuf>,
-}
-
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     // Parse de argumentos CLI (trata --help e --version automaticamente)
-    let cli = Cli::parse();
+    let cli = cli::Cli::parse();
 
-    // ── Logging estruturado ────────────────────────────────────────────
+    // ── Logging estruturado (silenciar logs normais para subcomandos de consulta se não for Run) ──
+    let is_query_cmd = cli.command.as_ref().map_or(false, |c| c != &cli::Commands::Run);
+    let default_filter = if is_query_cmd { "warn" } else { "info" };
+
     fmt()
         .with_env_filter(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(default_filter)),
         )
         .init();
-
-    info!("🟢 Goy Node v{} starting", env!("CARGO_PKG_VERSION"));
 
     // ── Configuração ───────────────────────────────────────────────────
     let project_dirs = ProjectDirs::from("com", "the-goy-company", "goy-node")
@@ -60,22 +44,39 @@ async fn main() -> anyhow::Result<()> {
 
     let config_path = cli
         .config
+        .clone()
         .or_else(|| std::env::var("GOY_NODE_CONFIG").map(PathBuf::from).ok())
         .unwrap_or_else(|| project_dirs.config_dir().join("config.toml"));
 
     let data_dir = cli
         .data_dir
+        .clone()
         .or_else(|| std::env::var("GOY_NODE_DATA_DIR").map(PathBuf::from).ok())
         .unwrap_or_else(|| project_dirs.data_dir().to_path_buf());
 
     let cfg = match config::Config::load_or_generate(&config_path) {
         Ok(c) => c,
         Err(e) => {
-            error!("❌ Configuration error: {e}");
+            eprintln!("❌ Configuration error: {e}");
             std::process::exit(1);
         }
     };
 
+    // Tratar subcomandos de consulta (status, peers, info, metrics)
+    if cli::handle_cli(&cli, cfg.metrics.listen.as_deref()).await? {
+        return Ok(());
+    }
+
+    // Subcomando `run` (ou default): iniciar o nó mesh agent
+    cmd_run(cfg, config_path, data_dir).await
+}
+
+async fn cmd_run(
+    cfg: config::Config,
+    config_path: PathBuf,
+    data_dir: PathBuf,
+) -> anyhow::Result<()> {
+    info!("🟢 Goy Node v{} starting", env!("CARGO_PKG_VERSION"));
     info!("✔ Config loaded from {}", config_path.display());
     info!("  Relay URL  : {}", cfg.relay.url);
     info!("  Listen addr: {}", cfg.mesh.listen);

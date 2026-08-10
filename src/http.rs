@@ -46,6 +46,7 @@ pub async fn run_http_server(
     listen_addr: String,
     metrics: Arc<Metrics>,
     node_info: NodeInfo,
+    mesh_state: Option<Arc<crate::mesh::MeshState>>,
     cancel: CancellationToken,
 ) -> anyhow::Result<()> {
     let listener = TcpListener::bind(&listen_addr).await?;
@@ -60,18 +61,15 @@ pub async fn run_http_server(
             res = listener.accept() => {
                 match res {
                     Ok((stream, peer)) => {
-                        // Sanity check: apenas localhost deve chegar aqui (o
-                        // listener só liga em 127.0.0.1:port). Recusamos
-                        // explicitamente qualquer conexão que venha de fora,
-                        // para defender contra erros de config (0.0.0.0:...).
                         if !peer.ip().is_loopback() {
                             warn!("⚠️ HTTP server rejected non-loopback connection from {peer}");
                             continue;
                         }
                         let m = metrics.clone();
                         let info = node_info.clone();
+                        let st = mesh_state.clone();
                         tokio::spawn(async move {
-                            if let Err(e) = handle_connection(stream, m, info).await {
+                            if let Err(e) = handle_connection(stream, m, info, st).await {
                                 debug!("HTTP connection error: {e}");
                             }
                         });
@@ -93,6 +91,7 @@ async fn handle_connection(
     stream: tokio::net::TcpStream,
     metrics: Arc<Metrics>,
     node_info: NodeInfo,
+    mesh_state: Option<Arc<crate::mesh::MeshState>>,
 ) -> anyhow::Result<()> {
     let mut reader = BufReader::new(stream);
     let mut request_line = String::new();
@@ -130,8 +129,6 @@ async fn handle_connection(
         "/health" => {
             let peers = metrics.peers_connected();
             let uptime = metrics.uptime_seconds();
-            // 200 se o processo está de pé; 503 ∧ status=degraded se não há
-            // peers conectados (mas ainda assim responde — útil para debug).
             let (status, status_str) = if peers > 0 {
                 (200u16, "ok")
             } else {
@@ -141,6 +138,14 @@ async fn handle_connection(
                 r#"{{"status":"{status_str}","peers":{peers},"uptime":{uptime}}}"#
             );
             (status, "application/json", body.into_bytes())
+        }
+        "/peers" => {
+            let peers_vec = mesh_state
+                .as_ref()
+                .map(|s| s.get_peer_sessions())
+                .unwrap_or_default();
+            let body = serde_json::to_string(&peers_vec).unwrap_or_else(|_| "[]".to_string());
+            (200, "application/json", body.into_bytes())
         }
         "/info" => {
             let fp = node_info.cert_fingerprint.as_deref().unwrap_or("null");
@@ -249,7 +254,7 @@ mod tests {
         let m = metrics.clone();
         let ni = node_info.clone();
         tokio::spawn(async move {
-            let _ = run_http_server(listen_clone, m, ni, cancel_clone).await;
+            let _ = run_http_server(listen_clone, m, ni, None, cancel_clone).await;
         });
 
         let (status, body) = http_get(&listen, "/metrics").await?;
@@ -293,7 +298,7 @@ mod tests {
         let m = metrics.clone();
         let ni = node_info.clone();
         tokio::spawn(async move {
-            let _ = run_http_server(listen_clone, m, ni, cancel_clone).await;
+            let _ = run_http_server(listen_clone, m, ni, None, cancel_clone).await;
         });
 
         let (status, body) = http_get(&listen, "/health").await?;
@@ -325,7 +330,7 @@ mod tests {
         let m = metrics.clone();
         let ni = node_info.clone();
         tokio::spawn(async move {
-            let _ = run_http_server(l, m, ni, c).await;
+            let _ = run_http_server(l, m, ni, None, c).await;
         });
 
         let (status, body) = http_get(&listen, "/health").await?;
@@ -356,7 +361,7 @@ mod tests {
         let m = metrics.clone();
         let ni = node_info.clone();
         tokio::spawn(async move {
-            let _ = run_http_server(l, m, ni, c).await;
+            let _ = run_http_server(l, m, ni, None, c).await;
         });
 
         let (status, body) = http_get(&listen, "/info").await?;
@@ -400,7 +405,7 @@ mod tests {
         let m = metrics.clone();
         let ni = node_info.clone();
         tokio::spawn(async move {
-            let _ = run_http_server(l, m, ni, c).await;
+            let _ = run_http_server(l, m, ni, None, c).await;
         });
 
         let (status, _body) = http_get(&listen, "/admin").await?;
