@@ -1,5 +1,5 @@
 # ── Stage 1: Build ──────────────────────────────────────────────────
-FROM rust:1.85-slim-bookworm AS builder
+FROM rust:1.97.1-slim-trixie AS builder
 
 WORKDIR /usr/src/goy-node
 
@@ -7,6 +7,7 @@ WORKDIR /usr/src/goy-node
 RUN apt-get update && apt-get install -y --no-install-recommends \
     pkg-config \
     libssl-dev \
+    build-essential \
     && rm -rf /var/lib/apt/lists/*
 
 # Copiar ficheiros de manifesto, código fonte e benchmarks
@@ -18,12 +19,12 @@ COPY benches ./benches
 RUN cargo build --release --bin goy-node
 
 # ── Stage 2: Runtime ────────────────────────────────────────────────
-FROM debian:bookworm-slim AS runtime
+FROM debian:trixie-slim AS runtime
 
 # Metadata OCI Labels
 LABEL org.opencontainers.image.title="goy-node" \
       org.opencontainers.image.description="Mesh agent for Goy Node — automatic Nostr relay synchronization over VPN" \
-      org.opencontainers.image.version="0.1.0" \
+      org.opencontainers.image.version="0.1.0-alpha" \
       org.opencontainers.image.vendor="The Goy Company" \
       org.opencontainers.image.licenses="Proprietary"
 
