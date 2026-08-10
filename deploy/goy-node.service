@@ -1,0 +1,36 @@
+[Unit]
+Description=Goy Node — Automatic Nostr relay mesh agent over VPN
+Documentation=https://github.com/the-goy-company/goy-node
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/goy-node run --config /etc/goy-node/config.toml --data-dir /var/lib/goy-node
+Restart=on-failure
+RestartSec=5s
+
+# Utilizador e Grupo não-root dedicados
+User=goy-node
+Group=goy-node
+WorkingDirectory=/var/lib/goy-node
+
+# Envio de logs para journald
+StandardOutput=journal
+StandardError=journal
+
+# Ficheiro opcional de variáveis de ambiente para overrides
+EnvironmentFile=-/etc/default/goy-node
+
+# Hardening / Segurança do Systemd
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/goy-node /etc/goy-node
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,30 @@
+version: '3.8'
+
+services:
+  goy-node:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    container_name: goy-node
+    restart: unless-stopped
+    ports:
+      - "7777:7777"
+      - "8443:8443"
+      - "9090:9090"
+    environment:
+      - GOY_NODE_METRICS_LISTEN=0.0.0.0:9090
+    volumes:
+      - goy-node-config:/etc/goy-node
+      - goy-node-data:/var/lib/goy-node
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:9090/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+
+volumes:
+  goy-node-config:
+    driver: local
+  goy-node-data:
+    driver: local
