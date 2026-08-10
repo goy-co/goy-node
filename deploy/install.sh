@@ -14,7 +14,7 @@ MACOS_PLIST_FILE="/Library/LaunchDaemons/com.goyco.goy-node.plist"
 DEFAULT_ENV_FILE="/etc/default/goy-node"
 SYSTEM_USER="goy-node"
 SYSTEM_GROUP="goy-node"
-GOY_NODE_VERSION="${GOY_NODE_VERSION:-v0.1.0-alpha}"
+GOY_NODE_VERSION="${GOY_NODE_VERSION:-v0.1.1-alpha}"
 
 # Funções de logging
 info() { echo -e "\033[34m[INFO]\033[0m $*"; }

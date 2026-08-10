@@ -33,7 +33,7 @@ FROM debian:trixie-slim AS runtime
 # Metadata OCI Labels
 LABEL org.opencontainers.image.title="goy-node" \
       org.opencontainers.image.description="Mesh agent for Goy Node — automatic Nostr relay synchronization over VPN" \
-      org.opencontainers.image.version="0.1.0-alpha" \
+      org.opencontainers.image.version="0.1.1-alpha" \
       org.opencontainers.image.vendor="The Goy Company" \
       org.opencontainers.image.licenses="Proprietary"
 

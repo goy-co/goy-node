@@ -71,8 +71,31 @@ goy-node run
 - **mTLS 1.3 with Trust-On-First-Use (TOFU)**: End-to-end encrypted peer traffic with pinned fingerprints ([`docs/mesh-protocol.md`](docs/mesh-protocol.md)).
 - **Nostr Protocol NIP Support**: Full compliance with NIP-09 (Deletion), NIP-16/33 (Replaceable Events), NIP-40 (Expiration), and NIP-42.
 - **Integrated Onboarding**: Plug-and-play setup via `goy-node onboard` ([`docs/deployment-guide.md`](docs/deployment-guide.md)).
-- **Prometheus Observability & Admin CLI**: Built-in HTTP endpoints and interactive CLI commands (`status`, `peers`, `info`, `metrics`).
+- **Prometheus Observability & Admin CLI**: Built-in HTTP endpoints (`/metrics`, `/health`, `/peers`, `/info`) exposing `goy_storage_reserved_bytes`, `goy_storage_available_bytes`, and `goy_storage_used_bytes`.
+- **Reserved Storage Contract**: Hardcoded 50 GB minimum reserved storage per node for network redundancy, with voluntary extra contribution via `[storage]` configuration ([`docs/limits.md`](docs/limits.md)).
 - **Architectural Decision Records**: Deep dives into design trade-offs ([`docs/adr/`](docs/adr/)).
+
+---
+
+## ⚙️ Configuration (`config.toml`)
+
+Goy Node is configured via `/etc/goy-node/config.toml` (or environment variables). A minimal configuration with reserved storage:
+
+```toml
+[relay]
+url = "ws://127.0.0.1:7777"
+
+[mesh]
+listen = "0.0.0.0:8443"
+
+[storage]
+# Minimum mandatory reserved storage is 50 GB (hardcoded).
+# Voluntary extra contribution in GB:
+extra_contribution_gb = 50
+data_dir = "/var/lib/goy-node"
+```
+
+Environment variable overrides: `GOY_NODE_EXTRA_STORAGE_GB` and `GOY_NODE_DATA_DIR`.
 
 ---
 
@@ -80,10 +103,10 @@ goy-node run
 
 For detailed performance benchmarks, memory consumption profiles, and hardware recommendations, see **[`docs/limits.md`](docs/limits.md)**.
 
-| Profile | Hardware | Throughput | Max Peers |
-|---|---|---|---|
-| **Minimum (Edge)** | 1 vCPU, 512 MB RAM | $\approx 500$ events/sec | 10 peers |
-| **Recommended (Hub)** | 2–4 vCPU, 2–4 GB RAM | $\approx 5,000$ events/sec | 50 peers |
+| Profile | Hardware | Disk (Free Space) | Throughput | Max Peers |
+|---|---|---|---|---|
+| **Minimum (Edge)** | 1 vCPU, 512 MB RAM | 50 GB (mandatory min) | $\approx 500$ events/sec | 10 peers |
+| **Recommended (Hub)** | 2–4 vCPU, 2–4 GB RAM | 100 GB+ NVMe SSD | $\approx 5,000$ events/sec | 50 peers |
 
 ---
 

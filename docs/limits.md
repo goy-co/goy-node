@@ -47,20 +47,60 @@ The memory footprint of `goy-node` is dominated by the in-memory deduplication s
 ### Minimum Hardware Specification (Small Node / Edge)
 - **CPU**: 1 vCPU (x86_64 or ARM64 / Apple Silicon).
 - **RAM**: 512 MB.
-- **Disk**: 5 GB NVMe / SSD.
+- **Disk**: 50 GB free space on `data_dir` filesystem (hardcoded minimum).
 - **Network**: 10 Mbps VPN connection.
 - **Target Workload**: Up to 10 peers, $\approx 500$ events/sec.
 
 ### Recommended Hardware Specification (Production Mesh Hub)
 - **CPU**: 2–4 vCPU.
 - **RAM**: 2 GB – 4 GB.
-- **Disk**: 20 GB NVMe SSD.
+- **Disk**: 100 GB+ NVMe SSD.
 - **Network**: 100 Mbps+ WireGuard / Headscale VPN.
 - **Target Workload**: 50+ peers, $\approx 5,000$ events/sec.
 
 ---
 
-## 5. Known Operational Trade-offs
+## 5. Requisitos de Storage
+
+O Goy Node implementa um contrato social obrigatório de armazenamento para garantir a redundância e persistência de dados em toda a rede mesh.
+
+### Espaço Reservado e Mínimo Obrigatório
+
+- **Mínimo Obrigatório (`MIN_RESERVED_GB`)**: **50 GB** (hardcoded no código-fonte, não configurável).
+- **Contribuição Voluntária Extra**: Configurável via `storage.extra_contribution_gb` em `config.toml` ou variável de ambiente `GOY_NODE_EXTRA_STORAGE_GB`.
+- **Fórmula de Espaço Reservado**:
+  $$\text{Total Reservado (GB)} = \text{MIN\_RESERVED\_GB (50)} + \text{extra\_contribution\_gb}$$
+
+### Tabela de Recomendações por Perfil de Operador
+
+| Perfil de Operador | Mínimo Obrigatório | Contribuição Extra | Total Reservado |
+|---|---|---|---|
+| **Voluntário Individual** | 50 GB | 0 – 50 GB | 50 – 100 GB |
+| **Organização Parceira** | 50 GB | 100 – 200 GB | 150 – 250 GB |
+| **Seed / Core Infrastructure** | 50 GB | 450+ GB | 500+ GB |
+
+### Comportamento Runtime perante Armazenamento Insuficiente
+
+1. **Verificação no arranque (`cmd_run`)**:
+   - Se o espaço disponível no filesystem do `data_dir` for inferior a 50 GB, o nó **recusa iniciar** com registo de erro limpo e **exit code 3** (`EXIT_STORAGE_ERROR`).
+2. **Verificação no onboarding (`goy-node onboard`)**:
+   - Aborta imediatamente a tentativa de registo e configuração de VPN se o espaço for < 50 GB, retornando **exit code 5** (`EXIT_ONBOARD_STORAGE_ERROR`).
+3. **Monitorização de Saúde (`GET /health`)**:
+   - Se o espaço disponível descer abaixo do limiar crítico de 10% do mínimo de 50 GB (5 GB = `5_368_709_120` bytes), o endpoint `/health` responde com HTTP 503 e `"status":"degraded"`.
+
+### Métricas Prometheus de Storage
+
+| Métrica | Tipo | Descrição |
+|---|---|---|
+| `goy_storage_reserved_bytes` | Gauge | Espaço total reservado para a mesh em bytes (mínimo 50 GB + extra). |
+| `goy_storage_available_bytes` | Gauge | Espaço livre atualmente disponível no filesystem do `data_dir`. |
+| `goy_storage_used_bytes` | Gauge | Espaço efetivamente ocupado pelo Goy Node no `data_dir`. |
+
+*Nota: Mecanismos avançados de evicção de dados e re-balanceamento dinâmico baseado em capacidade de storage estão planeados para a release v0.2.0.*
+
+---
+
+## 6. Known Operational Trade-offs
 
 1. **JSON State Serialization vs Binary Storage**:
    - `seen_ids` is stored as JSON array. For sets larger than 1,000,000 IDs ($>70$ MB), disk serialization pause takes $\approx 200$ ms. Future major release may introduce a binary columnar format if `seen_ids` exceeds 5 million entries.
