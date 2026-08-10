@@ -18,6 +18,7 @@ mod mesh;
 mod rate_limiter;
 mod registry;
 mod relay;
+mod tls;
 
 /// Opções CLI para o Goy Node
 #[derive(Parser, Debug)]

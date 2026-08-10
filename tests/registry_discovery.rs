@@ -114,6 +114,7 @@ async fn test_registry_client_http_ops() -> anyhow::Result<()> {
         mesh_url: "ws://127.0.0.1:19500".to_string(),
         version: "0.1.0".to_string(),
         capabilities: vec!["nostr".to_string(), "mesh".to_string()],
+        cert_fingerprint: None,
         last_seen: None,
     };
 

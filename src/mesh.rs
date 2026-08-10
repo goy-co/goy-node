@@ -24,6 +24,49 @@ use tracing::{error, info, warn};
 use crate::config::MeshConfig;
 use crate::registry::{self, RegistryClient, RelayInfo};
 use crate::relay::RelayEvent;
+use crate::tls::{FingerprintStore, NodeCertificate, TrustDecision};
+
+/// Contexto TLS partilhado pelas tasks do mesh.
+///
+/// Quando `mesh.tls_enabled = false` este contexto é `None` e todas as
+/// conexões usam TCP plaintext (apenas para testes locais).
+pub struct TlsContext {
+    /// Certificado auto-assinado deste nó.
+    pub cert: NodeCertificate,
+    /// Store TOFU de fingerprints conhecidos por peer.
+    pub fingerprints: FingerprintStore,
+    /// Configuração rustls do listener (mTLS, TLS 1.3).
+    pub server_config: Arc<rustls::ServerConfig>,
+}
+
+impl std::fmt::Debug for TlsContext {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TlsContext")
+            .field("fingerprint", &self.cert.fingerprint)
+            .finish()
+    }
+}
+
+impl TlsContext {
+    /// Constrói o contexto TLS a partir da config e do `node_id`.
+    pub fn new(
+        cfg: &MeshConfig,
+        node_id: &str,
+        data_dir: Option<&Path>,
+    ) -> anyhow::Result<Self> {
+        let cert = match data_dir {
+            Some(dir) => crate::tls::load_or_generate_cert(dir, node_id)?,
+            None => crate::tls::generate_self_signed(node_id)?,
+        };
+        let server_config = crate::tls::server_config(&cert)?;
+        let fingerprints = FingerprintStore::load(data_dir, &cfg.trusted_fingerprints);
+        Ok(Self {
+            cert,
+            fingerprints,
+            server_config,
+        })
+    }
+}
 
 /// Estado compartilhado entre todas as tarefas do mesh agent.
 pub struct MeshState {
@@ -516,9 +559,24 @@ pub async fn run(
     let mesh_url = crate::config::detect_mesh_url(&cfg.listen, cfg.mesh_url.as_deref());
     info!("🆔 Node ID: {node_id}");
 
+    // ── Contexto TLS (certificado do nó + store TOFU) ──────────────────
+    let tls_ctx: Option<Arc<TlsContext>> = if cfg.tls_enabled {
+        let ctx = Arc::new(TlsContext::new(&cfg, &node_id, data_dir.as_deref())?);
+        info!("🔐 Node cert fingerprint: {}", ctx.cert.fingerprint);
+        Some(ctx)
+    } else {
+        warn!("🔓 TLS DISABLED (mesh.tls_enabled = false) — peer traffic is PLAINTEXT. Dev/testing only!");
+        None
+    };
+    let cert_fingerprint = tls_ctx.as_ref().map(|c| c.cert.fingerprint.clone());
+
     // ── Listener para peers ────────────────────────────────────────────
     let listener = TcpListener::bind(&cfg.listen).await?;
-    info!("🌐 Mesh agent listening on {}", cfg.listen);
+    info!(
+        "🌐 Mesh agent listening on {} ({})",
+        cfg.listen,
+        if tls_ctx.is_some() { "TLS 1.3 mutual" } else { "plaintext" }
+    );
 
     // ── Task: consumir eventos do relay local → replicar para peers ──
     let state_clone = state.clone();
@@ -567,6 +625,7 @@ pub async fn run(
         start_seed_task(
             seed_url,
             state.clone(),
+            tls_ctx.clone(),
             heartbeat_secs,
             cancel.clone(),
         );
@@ -589,6 +648,7 @@ pub async fn run(
             mesh_url: mesh_url.clone(),
             version: env!("CARGO_PKG_VERSION").to_string(),
             capabilities: vec!["nostr".to_string(), "mesh".to_string()],
+            cert_fingerprint: cert_fingerprint.clone(),
             last_seen: None,
         };
 
@@ -631,6 +691,7 @@ pub async fn run(
         let cancel_disc = cancel.clone();
         let discovery_secs = cfg.discovery_secs;
         let data_dir_disc = data_dir.clone();
+        let tls_disc = tls_ctx.clone();
 
         tokio::spawn(async move {
             let missing_cycles: DashMap<String, u32> = DashMap::new();
@@ -663,6 +724,7 @@ pub async fn run(
                                         start_seed_task(
                                             relay.mesh_url.clone(),
                                             state_disc.clone(),
+                                            tls_disc.clone(),
                                             hb_interval_secs,
                                             cancel_disc.clone(),
                                         );
@@ -691,6 +753,7 @@ pub async fn run(
                                             start_seed_task(
                                                 relay.mesh_url.clone(),
                                                 state_disc.clone(),
+                                                tls_disc.clone(),
                                                 hb_interval_secs,
                                                 cancel_disc.clone(),
                                             );
@@ -746,7 +809,8 @@ pub async fn run(
                         info!("🤝 Peer connected inbound: {addr}");
                         let state = state.clone();
                         let cancel = cancel.clone();
-                        tokio::spawn(handle_inbound_peer(stream, addr, state, heartbeat_secs, cancel));
+                        let tls = tls_ctx.clone();
+                        tokio::spawn(handle_inbound_peer(stream, addr, state, tls, heartbeat_secs, cancel));
                     }
                     Err(e) => {
                         error!("❌ Failed to accept peer connection: {e}");
@@ -763,14 +827,16 @@ pub async fn run(
 }
 
 /// Spawna a task de reconexão automática para um seed remoto.
+///
+/// A conexão é TLS 1.3 mútua com verificação de fingerprint quando `tls_ctx`
+/// está presente; caso contrário é TCP plaintext (dev-only).
 fn start_seed_task(
     seed_url: String,
     state: Arc<MeshState>,
+    tls_ctx: Option<Arc<TlsContext>>,
     heartbeat_secs: u64,
     cancel: CancellationToken,
 ) {
-    use tokio_tungstenite::connect_async;
-
     tokio::spawn(async move {
         let backoff = ExponentialBackoffBuilder::new()
             .with_initial_interval(Duration::from_secs(1))
@@ -783,6 +849,7 @@ fn start_seed_task(
             let seed_url = seed_url_clone.clone();
             let state = state.clone();
             let cancel = cancel.clone();
+            let tls_ctx = tls_ctx.clone();
 
             async move {
                 if cancel.is_cancelled() {
@@ -795,16 +862,20 @@ fn start_seed_task(
                 }
 
                 info!("🌱 Connecting outbound to seed: {seed_url}");
-                match connect_async(&seed_url).await {
-                    Ok((ws, _)) => {
-                        info!("🟢 Outbound connection established to seed: {seed_url}");
-                        let (sink, stream) = ws.split();
+                match connect_to_peer(&seed_url, tls_ctx.as_ref()).await {
+                    Ok(PeerConnection::Tls { sink, stream }) => {
+                        info!("🟢 Outbound TLS connection established to seed: {seed_url}");
+                        handle_peer_stream(seed_url.clone(), sink, stream, state, heartbeat_secs, cancel).await;
+                        Err::<(), _>(backoff::Error::transient(anyhow::anyhow!("seed connection ended")))
+                    }
+                    Ok(PeerConnection::Plain { sink, stream }) => {
+                        info!("🟢 Outbound plaintext connection established to seed: {seed_url}");
                         handle_peer_stream(seed_url.clone(), sink, stream, state, heartbeat_secs, cancel).await;
                         Err::<(), _>(backoff::Error::transient(anyhow::anyhow!("seed connection ended")))
                     }
                     Err(e) => {
                         warn!("🔌 Seed connection to {seed_url} failed: {e}. Reconnecting…");
-                        Err::<(), _>(backoff::Error::transient(anyhow::Error::new(e)))
+                        Err::<(), _>(backoff::Error::transient(e))
                     }
                 }
             }
@@ -816,27 +887,178 @@ fn start_seed_task(
     });
 }
 
-/// Trata conexão inbound de um peer (TcpStream -> WebSocket).
+/// Trata conexão inbound de um peer.
+///
+/// Quando o TLS está ativo, faz primeiro o handshake TLS 1.3 mútuo, verifica o
+/// fingerprint do certificado do cliente contra o store TOFU e só depois faz o
+/// upgrade para WebSocket. O resto do protocolo é idêntico ao plaintext.
 async fn handle_inbound_peer(
     stream: tokio::net::TcpStream,
     addr: SocketAddr,
     state: Arc<MeshState>,
+    tls_ctx: Option<Arc<TlsContext>>,
     heartbeat_secs: u64,
     cancel: CancellationToken,
 ) {
     use tokio_tungstenite::accept_async;
 
-    let ws = match accept_async(stream).await {
-        Ok(ws) => ws,
+    let peer_id = format!("inbound:{addr}");
+
+    let Some(tls) = tls_ctx else {
+        // Fallback plaintext (dev-only)
+        let ws = match accept_async(stream).await {
+            Ok(ws) => ws,
+            Err(e) => {
+                warn!("❌ WebSocket handshake failed for {addr}: {e}");
+                return;
+            }
+        };
+        let (sink, stream) = ws.split();
+        handle_peer_stream(peer_id, sink, stream, state, heartbeat_secs, cancel).await;
+        return;
+    };
+
+    let acceptor = tokio_rustls::TlsAcceptor::from(tls.server_config.clone());
+    let tls_stream = match acceptor.accept(stream).await {
+        Ok(s) => s,
         Err(e) => {
-            warn!("❌ WebSocket handshake failed for {addr}: {e}");
+            warn!("🔒 TLS handshake failed for inbound peer {addr}: {e}");
             return;
         }
     };
 
-    let peer_id = format!("inbound:{addr}");
+    // Verificar o fingerprint do certificado do cliente (TOFU).
+    let (_, conn) = tls_stream.get_ref();
+    let Some(received) = crate::tls::peer_fingerprint(conn) else {
+        warn!("🔒 Inbound peer {addr} presented no client certificate, rejecting");
+        return;
+    };
+
+    match tls.fingerprints.verify_or_learn(&peer_id, &received) {
+        TrustDecision::Match => {
+            info!("🔐 Inbound peer {addr} verified (fingerprint {received})");
+        }
+        TrustDecision::LearnedOnFirstUse => {
+            info!("🔐 Inbound peer {addr} trusted on first use (fingerprint {received})");
+        }
+        TrustDecision::Mismatch { expected, .. } => {
+            error!(
+                "🚨 Rejecting inbound peer {addr}: fingerprint mismatch — expected {expected}, received {received} (possible MITM)"
+            );
+            return;
+        }
+    }
+
+    let ws = match accept_async(tls_stream).await {
+        Ok(ws) => ws,
+        Err(e) => {
+            warn!("❌ WebSocket handshake failed for {addr} over TLS: {e}");
+            return;
+        }
+    };
+
     let (sink, stream) = ws.split();
     handle_peer_stream(peer_id, sink, stream, state, heartbeat_secs, cancel).await;
+}
+
+/// Estabelece uma conexão WebSocket outbound a um peer, sobre TLS 1.3 mútuo
+/// quando `tls_ctx` está presente, ou TCP plaintext quando não está.
+///
+/// A identidade do peer é verificada pelo fingerprint do certificado: pinned ou
+/// previamente conhecido tem de bater exatamente; peer novo é aceite e o
+/// fingerprint é guardado (trust-on-first-use).
+async fn connect_to_peer(
+    peer_url: &str,
+    tls_ctx: Option<&Arc<TlsContext>>,
+) -> anyhow::Result<PeerConnection> {
+    use tokio_tungstenite::{client_async, connect_async};
+
+    let Some(tls) = tls_ctx else {
+        let (ws, _) = connect_async(peer_url).await?;
+        let (sink, stream) = ws.split();
+        return Ok(PeerConnection::Plain { sink, stream });
+    };
+
+    let (host, port) = parse_ws_host_port(peer_url)?;
+    let expected = tls.fingerprints.expected(peer_url);
+    let (client_cfg, observed) = crate::tls::client_config(&tls.cert, peer_url, expected)?;
+
+    let tcp = tokio::net::TcpStream::connect((host.as_str(), port)).await?;
+    let server_name = rustls::pki_types::ServerName::try_from(host.clone())
+        .map_err(|e| anyhow::anyhow!("invalid server name '{host}': {e}"))?
+        .to_owned();
+
+    let connector = tokio_rustls::TlsConnector::from(client_cfg);
+    let tls_stream = connector.connect(server_name, tcp).await.map_err(|e| {
+        anyhow::anyhow!("TLS handshake with {peer_url} failed: {e}")
+    })?;
+
+    // Handshake passou: se o peer era desconhecido, aprende o fingerprint agora.
+    let received = observed
+        .lock()
+        .ok()
+        .and_then(|g| g.clone())
+        .ok_or_else(|| anyhow::anyhow!("no peer certificate observed for {peer_url}"))?;
+
+    match tls.fingerprints.verify_or_learn(peer_url, &received) {
+        TrustDecision::Match => {
+            info!("🔐 Outbound peer {peer_url} verified (fingerprint {received})");
+        }
+        TrustDecision::LearnedOnFirstUse => {
+            info!("🔐 Outbound peer {peer_url} trusted on first use (fingerprint {received})");
+        }
+        TrustDecision::Mismatch { expected, .. } => {
+            anyhow::bail!(
+                "fingerprint mismatch for {peer_url}: expected {expected}, received {received} (possible MITM)"
+            );
+        }
+    }
+
+    let (ws, _) = client_async(peer_url, tls_stream).await?;
+    let (sink, stream) = ws.split();
+    Ok(PeerConnection::Tls { sink, stream })
+}
+
+type WsStreamOf<S> = tokio_tungstenite::WebSocketStream<S>;
+type TlsClientStream = tokio_rustls::client::TlsStream<tokio::net::TcpStream>;
+type PlainWs = tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>;
+
+/// Conexão outbound estabelecida, em TLS ou plaintext.
+enum PeerConnection {
+    Tls {
+        sink: futures_util::stream::SplitSink<WsStreamOf<TlsClientStream>, Message>,
+        stream: futures_util::stream::SplitStream<WsStreamOf<TlsClientStream>>,
+    },
+    Plain {
+        sink: futures_util::stream::SplitSink<WsStreamOf<PlainWs>, Message>,
+        stream: futures_util::stream::SplitStream<WsStreamOf<PlainWs>>,
+    },
+}
+
+/// Extrai `(host, port)` de um URL `ws://host:port` ou `wss://host:port`.
+fn parse_ws_host_port(url: &str) -> anyhow::Result<(String, u16)> {
+    let rest = url
+        .strip_prefix("ws://")
+        .or_else(|| url.strip_prefix("wss://"))
+        .ok_or_else(|| anyhow::anyhow!("peer URL '{url}' must start with ws:// or wss://"))?;
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or(rest);
+
+    let (host, port) = match authority.rsplit_once(':') {
+        Some((h, p)) if !h.is_empty() && p.chars().all(|c| c.is_ascii_digit()) => (
+            h.to_string(),
+            p.parse::<u16>()
+                .map_err(|e| anyhow::anyhow!("invalid port in '{url}': {e}"))?,
+        ),
+        _ => (
+            authority.to_string(),
+            if url.starts_with("wss://") { 443 } else { 80 },
+        ),
+    };
+
+    if host.is_empty() {
+        anyhow::bail!("peer URL '{url}' has no host");
+    }
+    Ok((host, port))
 }
 
 /// Handler unificado de sessão peer bidirecional (independente de inbound ou outbound).
@@ -1224,6 +1446,17 @@ mod tests {
         assert_eq!(extract_event_id(msg_invalid), None);
     }
 
+    /// Reserva uma porta efémera em loopback e devolve-a já libertada.
+    ///
+    /// Os testes correm em paralelo (e `cargo test` corre os binários lib e bin
+    /// em simultâneo), por isso portas fixas colidem de forma intermitente.
+    async fn free_addr() -> anyhow::Result<std::net::SocketAddr> {
+        let l = TcpListener::bind("127.0.0.1:0").await?;
+        let addr = l.local_addr()?;
+        drop(l);
+        Ok(addr)
+    }
+
     #[tokio::test]
     async fn test_bidirectional_relay_and_peer_flow() -> anyhow::Result<()> {
         use tokio_tungstenite::connect_async;
@@ -1232,8 +1465,9 @@ mod tests {
         let (relay_publish_tx, mut relay_publish_rx) = mpsc::channel::<String>(16);
         let cancel = CancellationToken::new();
 
+        let addr = free_addr().await?;
         let cfg = MeshConfig {
-            listen: "127.0.0.1:18443".to_string(),
+            listen: addr.to_string(),
             seeds: vec![],
             registry_url: None,
             heartbeat_secs: 30,
@@ -1244,6 +1478,9 @@ mod tests {
             max_events_per_second_per_peer: 50,
             max_bytes_per_second_per_peer: 1_048_576,
             max_message_size: 524_288,
+            // Estes testes legados falam WebSocket plaintext diretamente.
+            tls_enabled: false,
+            trusted_fingerprints: std::collections::HashMap::new(),
         };
 
         let cancel_mesh = cancel.clone();
@@ -1254,7 +1491,8 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(100)).await;
 
         // Conecta peer via WebSocket
-        let ws_url = "ws://127.0.0.1:18443";
+        let ws_url = format!("ws://{addr}");
+        let ws_url = ws_url.as_str();
         let (mut ws_stream, _) = connect_async(ws_url).await?;
 
         // Peer deve receber a mensagem de pedido de backfill inicial enviada pelo nó
@@ -1303,12 +1541,14 @@ mod tests {
     async fn test_two_nodes_seed_connection_flow() -> anyhow::Result<()> {
         let cancel = CancellationToken::new();
 
-        // ── Node A (sem seeds, escuta em 18446) ───────────────────────────
+        let (addr_a, addr_b) = (free_addr().await?, free_addr().await?);
+
+        // ── Node A (sem seeds) ────────────────────────────────────────────
         let (relay_events_tx_a, relay_events_rx_a) = broadcast::channel::<RelayEvent>(16);
         let (relay_publish_tx_a, mut relay_publish_rx_a) = mpsc::channel::<String>(16);
 
         let cfg_a = MeshConfig {
-            listen: "127.0.0.1:18446".to_string(),
+            listen: addr_a.to_string(),
             seeds: vec![],
             registry_url: None,
             heartbeat_secs: 30,
@@ -1319,6 +1559,9 @@ mod tests {
             max_events_per_second_per_peer: 50,
             max_bytes_per_second_per_peer: 1_048_576,
             max_message_size: 524_288,
+            // Estes testes legados falam WebSocket plaintext diretamente.
+            tls_enabled: false,
+            trusted_fingerprints: std::collections::HashMap::new(),
         };
 
         let cancel_a = cancel.clone();
@@ -1331,8 +1574,8 @@ mod tests {
         let (relay_publish_tx_b, mut relay_publish_rx_b) = mpsc::channel::<String>(16);
 
         let cfg_b = MeshConfig {
-            listen: "127.0.0.1:18447".to_string(),
-            seeds: vec!["ws://127.0.0.1:18446".to_string()],
+            listen: addr_b.to_string(),
+            seeds: vec![format!("ws://{addr_a}")],
             registry_url: None,
             heartbeat_secs: 30,
             discovery_secs: 60,
@@ -1342,6 +1585,9 @@ mod tests {
             max_events_per_second_per_peer: 50,
             max_bytes_per_second_per_peer: 1_048_576,
             max_message_size: 524_288,
+            // Estes testes legados falam WebSocket plaintext diretamente.
+            tls_enabled: false,
+            trusted_fingerprints: std::collections::HashMap::new(),
         };
 
         let cancel_b = cancel.clone();
@@ -1424,12 +1670,14 @@ mod tests {
             }
         });
 
-        // ── 2. Node A (configurado com mock relay url, escuta em 18450) ──
+        let (addr_a, addr_b) = (free_addr().await?, free_addr().await?);
+
+        // ── 2. Node A (configurado com mock relay url) ──
         let (relay_events_tx_a, relay_events_rx_a) = broadcast::channel::<RelayEvent>(16);
         let (relay_publish_tx_a, _relay_publish_rx_a) = mpsc::channel::<String>(16);
 
         let cfg_a = MeshConfig {
-            listen: "127.0.0.1:18450".to_string(),
+            listen: addr_a.to_string(),
             seeds: vec![],
             registry_url: None,
             heartbeat_secs: 30,
@@ -1440,6 +1688,9 @@ mod tests {
             max_events_per_second_per_peer: 50,
             max_bytes_per_second_per_peer: 1_048_576,
             max_message_size: 524_288,
+            // Estes testes legados falam WebSocket plaintext diretamente.
+            tls_enabled: false,
+            trusted_fingerprints: std::collections::HashMap::new(),
         };
 
         let cancel_a = cancel.clone();
@@ -1452,8 +1703,8 @@ mod tests {
         let (relay_publish_tx_b, mut relay_publish_rx_b) = mpsc::channel::<String>(16);
 
         let cfg_b = MeshConfig {
-            listen: "127.0.0.1:18451".to_string(),
-            seeds: vec!["ws://127.0.0.1:18450".to_string()],
+            listen: addr_b.to_string(),
+            seeds: vec![format!("ws://{addr_a}")],
             registry_url: None,
             heartbeat_secs: 30,
             discovery_secs: 60,
@@ -1463,6 +1714,9 @@ mod tests {
             max_events_per_second_per_peer: 50,
             max_bytes_per_second_per_peer: 1_048_576,
             max_message_size: 524_288,
+            // Estes testes legados falam WebSocket plaintext diretamente.
+            tls_enabled: false,
+            trusted_fingerprints: std::collections::HashMap::new(),
         };
 
         let cancel_b = cancel.clone();
@@ -1508,12 +1762,14 @@ mod tests {
 
         let cancel = CancellationToken::new();
 
+        let addr_a = free_addr().await?;
+
         // ── Node A (heartbeat_secs = 1 -> timeout threshold = 3s) ──────
         let (_relay_events_tx_a, relay_events_rx_a) = broadcast::channel::<RelayEvent>(16);
         let (relay_publish_tx_a, _relay_publish_rx_a) = mpsc::channel::<String>(16);
 
         let cfg_a = MeshConfig {
-            listen: "127.0.0.1:18460".to_string(),
+            listen: addr_a.to_string(),
             seeds: vec![],
             registry_url: None,
             heartbeat_secs: 1, // timeout = 3s
@@ -1524,6 +1780,9 @@ mod tests {
             max_events_per_second_per_peer: 50,
             max_bytes_per_second_per_peer: 1_048_576,
             max_message_size: 524_288,
+            // Estes testes legados falam WebSocket plaintext diretamente.
+            tls_enabled: false,
+            trusted_fingerprints: std::collections::HashMap::new(),
         };
 
         let cancel_a = cancel.clone();
@@ -1534,7 +1793,7 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(100)).await;
 
         // Peer conecta a Node A
-        let (mut ws_stream, _) = connect_async("ws://127.0.0.1:18460").await?;
+        let (mut ws_stream, _) = connect_async(format!("ws://{addr_a}")).await?;
 
         // 1. Recebe pedido de backfill inicial
         let init_req = tokio::time::timeout(Duration::from_secs(2), ws_stream.next())
@@ -1661,6 +1920,9 @@ mod tests {
             max_events_per_second_per_peer: 50,
             max_bytes_per_second_per_peer: 1_048_576,
             max_message_size: 524_288,
+            // Estes testes legados falam WebSocket plaintext diretamente.
+            tls_enabled: false,
+            trusted_fingerprints: std::collections::HashMap::new(),
         };
         let cancel_a = cancel.clone();
         tokio::spawn(async move {
@@ -1691,6 +1953,9 @@ mod tests {
             max_events_per_second_per_peer: 50,
             max_bytes_per_second_per_peer: 1_048_576,
             max_message_size: 524_288,
+            // Estes testes legados falam WebSocket plaintext diretamente.
+            tls_enabled: false,
+            trusted_fingerprints: std::collections::HashMap::new(),
         };
 
         let c_b1 = cancel_b1.clone();
@@ -1739,6 +2004,9 @@ mod tests {
             max_events_per_second_per_peer: 50,
             max_bytes_per_second_per_peer: 1_048_576,
             max_message_size: 524_288,
+            // Estes testes legados falam WebSocket plaintext diretamente.
+            tls_enabled: false,
+            trusted_fingerprints: std::collections::HashMap::new(),
         };
 
         let c_b2 = cancel_b2.clone();

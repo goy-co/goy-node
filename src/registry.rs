@@ -21,6 +21,9 @@ pub struct RelayInfo {
     pub mesh_url: String,
     pub version: String,
     pub capabilities: Vec<String>,
+    /// Fingerprint SHA-256 (hex) do certificado TLS do nó. `None` quando TLS está desativado.
+    #[serde(default)]
+    pub cert_fingerprint: Option<String>,
     #[serde(default)]
     pub last_seen: Option<u64>,
 }

@@ -27,6 +27,13 @@ seeds = []
 
 # Intervalo entre mensagens keepalive/heartbeat em segundos (default: 30s)
 heartbeat_secs = 30
+
+# TLS mútuo entre peers (default: true). Desativar apenas para testes locais.
+tls_enabled = true
+
+# Fingerprints SHA-256 pré-aprovados (têm prioridade sobre trust-on-first-use)
+# [mesh.trusted_fingerprints]
+# "ws://peer1:8443" = "a1b2c3..."
 "#;
 
 #[derive(Debug, Clone, Deserialize)]
@@ -74,6 +81,13 @@ pub struct MeshConfig {
     /// Tamanho máximo de mensagem recebida em bytes (default: 512KB = 524288)
     #[serde(default = "default_max_msg_size")]
     pub max_message_size: usize,
+    /// Ativa TLS mútuo entre peers (default: true). `false` é apenas para testes locais.
+    #[serde(default = "default_tls_enabled")]
+    pub tls_enabled: bool,
+    /// Fingerprints SHA-256 pré-aprovados por peer (peer_id/mesh_url -> fingerprint).
+    /// Têm prioridade sobre o trust-on-first-use.
+    #[serde(default)]
+    pub trusted_fingerprints: std::collections::HashMap<String, String>,
 }
 
 fn default_heartbeat() -> u64 {
@@ -98,6 +112,10 @@ fn default_max_bytes_per_sec() -> u64 {
 
 fn default_max_msg_size() -> usize {
     524_288
+}
+
+fn default_tls_enabled() -> bool {
+    true
 }
 
 impl Config {
@@ -207,6 +225,12 @@ impl Config {
             }
         }
 
+        if let Ok(v_raw) = std::env::var("GOY_NODE_TLS_ENABLED") {
+            let enabled = matches!(v_raw.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on");
+            info!("🔧 Override from env GOY_NODE_TLS_ENABLED: {enabled}");
+            self.mesh.tls_enabled = enabled;
+        }
+
         if let Ok(v_raw) = std::env::var("GOY_NODE_MAX_MSG_SIZE") {
             if let Ok(v) = v_raw.parse::<usize>() {
                 info!("🔧 Override from env GOY_NODE_MAX_MSG_SIZE: {v}");
@@ -258,6 +282,23 @@ impl Config {
             anyhow::bail!("Invalid mesh.discovery_secs: must be greater than 0");
         }
 
+        // 6. Valida os fingerprints pré-aprovados (SHA-256 = 64 chars hex)
+        for (peer, fp) in &self.mesh.trusted_fingerprints {
+            let normalized = crate::tls::normalize_fingerprint(fp);
+            if normalized.len() != 64 || !normalized.chars().all(|c| c.is_ascii_hexdigit()) {
+                anyhow::bail!(
+                    "Invalid trusted fingerprint for peer '{peer}': '{fp}' is not a 64-char SHA-256 hex digest"
+                );
+            }
+        }
+
+        // 7. Avisa claramente quando o TLS está desativado
+        if !self.mesh.tls_enabled {
+            warn!(
+                "🔓 mesh.tls_enabled = false — peer traffic is PLAINTEXT. Dev/testing only, never use in production."
+            );
+        }
+
         Ok(())
     }
 }
@@ -276,6 +317,8 @@ impl Default for MeshConfig {
             max_events_per_second_per_peer: default_max_events_per_sec(),
             max_bytes_per_second_per_peer: default_max_bytes_per_sec(),
             max_message_size: default_max_msg_size(),
+            tls_enabled: default_tls_enabled(),
+            trusted_fingerprints: std::collections::HashMap::new(),
         }
     }
 }
