@@ -75,6 +75,11 @@ time = { version = "0.3", default-features = false, features = ["std"] }
 
 [dev-dependencies]
 tempfile = "3"
+criterion = { version = "0.5", features = ["async_tokio"] }
+
+[[bench]]
+name = "event_throughput"
+harness = false
 
 [profile.release]
 strip = true
