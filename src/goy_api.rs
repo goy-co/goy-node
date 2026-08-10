@@ -51,7 +51,10 @@ impl GoyApiClient {
             .build()
             .unwrap_or_default();
 
-        Self { base_url: url, http }
+        Self {
+            base_url: url,
+            http,
+        }
     }
 
     /// Registar nó na API da Goy Company usando a auth key.
@@ -61,7 +64,9 @@ impl GoyApiClient {
         node_id: Option<&str>,
     ) -> anyhow::Result<NodeRegisterResponse> {
         if !validate_auth_key(auth_key) {
-            anyhow::bail!("Invalid auth key format. Key must start with 'gc_' and have at least 10 characters.");
+            anyhow::bail!(
+                "Invalid auth key format. Key must start with 'gc_' and have at least 10 characters."
+            );
         }
 
         // Se modo MOCK estiver ativo (env var ou ambiente de teste sem conectividade)
@@ -98,11 +103,7 @@ impl GoyApiClient {
     }
 
     /// Deregistar nó da plataforma Goy Company.
-    pub async fn deregister_node(
-        &self,
-        bearer_token: &str,
-        node_id: &str,
-    ) -> anyhow::Result<()> {
+    pub async fn deregister_node(&self, bearer_token: &str, node_id: &str) -> anyhow::Result<()> {
         if std::env::var("GOY_API_MOCK").is_ok() || self.base_url.contains("mock.local") {
             info!("⚙️ Goy API Mock mode active for deregistration");
             return Ok(());
@@ -119,7 +120,10 @@ impl GoyApiClient {
             .await?;
 
         if !resp.status().is_success() {
-            warn!("⚠️ Goy API deregistration returned status {}", resp.status());
+            warn!(
+                "⚠️ Goy API deregistration returned status {}",
+                resp.status()
+            );
         }
 
         Ok(())

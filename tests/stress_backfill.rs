@@ -20,11 +20,12 @@ async fn test_stress_backfill_stream_performance() -> anyhow::Result<()> {
     let (addr_a, addr_b) = (free_addr().await, free_addr().await);
     let cancel = CancellationToken::new();
 
-    // Node A (populado com eventos simulados)
-    let mut cfg_a = MeshConfig::default();
-    cfg_a.listen = addr_a.clone();
-    cfg_a.tls_enabled = false;
-    cfg_a.replication_factor = 3;
+    let cfg_a = MeshConfig {
+        listen: addr_a.clone(),
+        tls_enabled: false,
+        replication_factor: 3,
+        ..MeshConfig::default()
+    };
 
     let (_relay_events_tx_a, relay_events_rx_a) = broadcast::channel::<RelayEvent>(16);
     let (relay_publish_tx_a, _relay_publish_rx_a) = tokio::sync::mpsc::channel::<String>(16);
@@ -43,11 +44,12 @@ async fn test_stress_backfill_stream_performance() -> anyhow::Result<()> {
         .await;
     });
 
-    // Node B (conecta a A e faz backfill)
-    let mut cfg_b = MeshConfig::default();
-    cfg_b.listen = addr_b.clone();
-    cfg_b.seeds = vec![format!("ws://{addr_a}")];
-    cfg_b.tls_enabled = false;
+    let cfg_b = MeshConfig {
+        listen: addr_b.clone(),
+        seeds: vec![format!("ws://{addr_a}")],
+        tls_enabled: false,
+        ..MeshConfig::default()
+    };
 
     let (_relay_events_tx_b, relay_events_rx_b) = broadcast::channel::<RelayEvent>(16);
     let (relay_publish_tx_b, _relay_publish_rx_b) = tokio::sync::mpsc::channel::<String>(16);

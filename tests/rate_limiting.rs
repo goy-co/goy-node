@@ -176,9 +176,8 @@ async fn test_peer_rate_limiting_burst_and_recovery() -> anyhow::Result<()> {
 
     // Enviar burst de 20 eventos rapidos do Node B
     for i in 0..20 {
-        let evt = format!(
-            r#"["EVENT","sub_burst",{{"id":"e_burst_{i:060}","content":"burst {i}"}}]"#
-        );
+        let evt =
+            format!(r#"["EVENT","sub_burst",{{"id":"e_burst_{i:060}","content":"burst {i}"}}]"#);
         relay_events_tx_b.send(RelayEvent { raw: evt })?;
     }
 
@@ -305,9 +304,8 @@ async fn test_peer_rate_limit_isolation() -> anyhow::Result<()> {
 
     // Node B esgota o seu próprio bucket enviando 25 eventos
     for i in 0..25 {
-        let evt_b = format!(
-            r#"["EVENT","sub_iso_b",{{"id":"e_from_b_{i:060}","content":"B {i}"}}]"#
-        );
+        let evt_b =
+            format!(r#"["EVENT","sub_iso_b",{{"id":"e_from_b_{i:060}","content":"B {i}"}}]"#);
         relay_events_tx_b.send(RelayEvent { raw: evt_b })?;
     }
 
@@ -320,7 +318,10 @@ async fn test_peer_rate_limit_isolation() -> anyhow::Result<()> {
         count_b += 1;
     }
     assert!(count_b < 25, "Node B should be rate limited");
-    assert!(count_b > 0, "Node B should have delivered some events before limit");
+    assert!(
+        count_b > 0,
+        "Node B should have delivered some events before limit"
+    );
 
     // Mesmo com o bucket do Node B esgotado, Node C envia evento e passa IMEDIATAMENTE!
     let evt_c = r#"["EVENT","sub_iso_c",{"id":"e_from_c_000000000000000000000000000000000000000000000000000001","content":"C event"}]"#;
@@ -330,7 +331,9 @@ async fn test_peer_rate_limit_isolation() -> anyhow::Result<()> {
 
     let rec_c = tokio::time::timeout(Duration::from_secs(2), relay_publish_rx_a.recv())
         .await?
-        .ok_or_else(|| anyhow::anyhow!("Node C event should pass independently of Node B's limit"))?;
+        .ok_or_else(|| {
+            anyhow::anyhow!("Node C event should pass independently of Node B's limit")
+        })?;
     assert!(rec_c.contains("e_from_c"));
 
     cancel.cancel();

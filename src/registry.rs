@@ -59,7 +59,10 @@ impl RegistryClient {
         let url = format!("{}/relays", self.registry_url);
         let resp = self.client.post(&url).json(info).send().await?;
         if resp.status().is_success() {
-            info!("📋 Node successfully registered at registry: {}", info.node_id);
+            info!(
+                "📋 Node successfully registered at registry: {}",
+                info.node_id
+            );
             Ok(())
         } else {
             let status = resp.status();
@@ -115,29 +118,31 @@ impl RegistryClient {
 /// Guarda a cache local da última lista de peers do registry em `data_dir/registry_peers.json`.
 pub fn save_cached_peers(data_dir: &Path, relays: &[RelayInfo]) {
     if let Err(e) = std::fs::create_dir_all(data_dir) {
-        warn!("⚠️  Failed to create data directory {}: {e}", data_dir.display());
+        warn!(
+            "⚠️  Failed to create data directory {}: {e}",
+            data_dir.display()
+        );
         return;
     }
 
     let file_path = data_dir.join("registry_peers.json");
     let tmp_path = data_dir.join("registry_peers.json.tmp");
-    if let Ok(bytes) = serde_json::to_vec(relays) {
-        if std::fs::write(&tmp_path, bytes).is_ok() {
-            let _ = std::fs::rename(tmp_path, file_path);
-        }
+    if let Ok(bytes) = serde_json::to_vec(relays)
+        && std::fs::write(&tmp_path, bytes).is_ok()
+    {
+        let _ = std::fs::rename(tmp_path, file_path);
     }
 }
 
 /// Carrega a cache local da última lista de peers do registry de `data_dir/registry_peers.json`.
 pub fn load_cached_peers(data_dir: &Path) -> Vec<RelayInfo> {
     let file_path = data_dir.join("registry_peers.json");
-    if file_path.exists() {
-        if let Ok(bytes) = std::fs::read(&file_path) {
-            if let Ok(relays) = serde_json::from_slice::<Vec<RelayInfo>>(&bytes) {
-                info!("💾 Loaded {} cached registry peers from disk", relays.len());
-                return relays;
-            }
-        }
+    if file_path.exists()
+        && let Ok(bytes) = std::fs::read(&file_path)
+        && let Ok(relays) = serde_json::from_slice::<Vec<RelayInfo>>(&bytes)
+    {
+        info!("💾 Loaded {} cached registry peers from disk", relays.len());
+        return relays;
     }
     vec![]
 }

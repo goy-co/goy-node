@@ -90,13 +90,22 @@ async fn test_two_nodes_tls_connect_and_sync() -> anyhow::Result<()> {
 
     // Ambos os nós geraram e persistiram o seu certificado.
     for dir in [dir_a.path(), dir_b.path()] {
-        assert!(dir.join("tls/node_cert.pem").exists(), "cert missing in {dir:?}");
-        assert!(dir.join("tls/node_key.pem").exists(), "key missing in {dir:?}");
+        assert!(
+            dir.join("tls/node_cert.pem").exists(),
+            "cert missing in {dir:?}"
+        );
+        assert!(
+            dir.join("tls/node_key.pem").exists(),
+            "key missing in {dir:?}"
+        );
     }
 
     // O nó B aprendeu (TOFU) e persistiu o fingerprint do nó A.
     let known_b = dir_b.path().join("known_fingerprints.json");
-    assert!(known_b.exists(), "node B did not persist known fingerprints");
+    assert!(
+        known_b.exists(),
+        "node B did not persist known fingerprints"
+    );
     let map: HashMap<String, String> = serde_json::from_slice(&std::fs::read(&known_b)?)?;
     let peer_key = format!("ws://{addr_a}");
     let learned = map

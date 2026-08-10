@@ -22,9 +22,11 @@ async fn test_admin_cli_endpoints_and_json_formatting() -> anyhow::Result<()> {
     let mesh_listen = free_addr().await;
     let metrics_listen = free_addr().await;
 
-    let mut cfg = MeshConfig::default();
-    cfg.listen = mesh_listen;
-    cfg.tls_enabled = false;
+    let cfg = MeshConfig {
+        listen: mesh_listen,
+        tls_enabled: false,
+        ..MeshConfig::default()
+    };
 
     let (_relay_events_tx, relay_events_rx) = broadcast::channel::<RelayEvent>(16);
     let (relay_publish_tx, _relay_publish_rx) = tokio::sync::mpsc::channel::<String>(16);
@@ -47,7 +49,10 @@ async fn test_admin_cli_endpoints_and_json_formatting() -> anyhow::Result<()> {
 
     // Wait for HTTP server startup
     for _ in 0..20 {
-        if tokio::net::TcpStream::connect(&metrics_listen).await.is_ok() {
+        if tokio::net::TcpStream::connect(&metrics_listen)
+            .await
+            .is_ok()
+        {
             break;
         }
         tokio::time::sleep(Duration::from_millis(50)).await;

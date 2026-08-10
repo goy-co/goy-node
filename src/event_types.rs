@@ -25,10 +25,11 @@ pub fn is_parameterized_replaceable(kind: u64) -> bool {
 pub fn extract_d_tag(event: &Value) -> String {
     if let Some(tags) = event.get("tags").and_then(|t| t.as_array()) {
         for tag in tags {
-            if let Some(tag_arr) = tag.as_array() {
-                if tag_arr.len() >= 2 && tag_arr[0].as_str() == Some("d") {
-                    return tag_arr[1].as_str().unwrap_or("").to_string();
-                }
+            if let Some(tag_arr) = tag.as_array()
+                && tag_arr.len() >= 2
+                && tag_arr[0].as_str() == Some("d")
+            {
+                return tag_arr[1].as_str().unwrap_or("").to_string();
             }
         }
     }
@@ -38,6 +39,7 @@ pub fn extract_d_tag(event: &Value) -> String {
 /// Calcula a chave única de substituição de um evento Nostr JSON.
 /// - Replaceable normal: "{pubkey}:{kind}"
 /// - Parameterized replaceable: "{pubkey}:{kind}:{d_tag}"
+///
 /// Retorna `None` se o evento não for substituível ou se faltarem campos obrigatórios (`pubkey`/`kind`).
 pub fn replacement_key(event: &Value) -> Option<String> {
     let kind = event.get("kind")?.as_u64()?;
@@ -66,12 +68,12 @@ pub fn extract_e_tags(event: &Value) -> Vec<String> {
     let mut ids = Vec::new();
     if let Some(tags) = event.get("tags").and_then(|t| t.as_array()) {
         for tag in tags {
-            if let Some(tag_arr) = tag.as_array() {
-                if tag_arr.len() >= 2 && tag_arr[0].as_str() == Some("e") {
-                    if let Some(id) = tag_arr[1].as_str() {
-                        ids.push(id.to_string());
-                    }
-                }
+            if let Some(tag_arr) = tag.as_array()
+                && tag_arr.len() >= 2
+                && tag_arr[0].as_str() == Some("e")
+                && let Some(id) = tag_arr[1].as_str()
+            {
+                ids.push(id.to_string());
             }
         }
     }
@@ -85,22 +87,22 @@ pub fn extract_a_tags(event: &Value) -> Vec<String> {
     let mut keys = Vec::new();
     if let Some(tags) = event.get("tags").and_then(|t| t.as_array()) {
         for tag in tags {
-            if let Some(tag_arr) = tag.as_array() {
-                if tag_arr.len() >= 2 && tag_arr[0].as_str() == Some("a") {
-                    if let Some(coord) = tag_arr[1].as_str() {
-                        // Coordenada formato NIP-33: "kind:pubkey" ou "kind:pubkey:d_tag"
-                        // Converter para o formato de replacement_key: "pubkey:kind" ou "pubkey:kind:d_tag"
-                        let parts: Vec<&str> = coord.splitn(3, ':').collect();
-                        if parts.len() >= 2 {
-                            let kind_str = parts[0];
-                            let pubkey = parts[1];
-                            let d_tag = parts.get(2).copied().unwrap_or("");
-                            if d_tag.is_empty() {
-                                keys.push(format!("{pubkey}:{kind_str}"));
-                            } else {
-                                keys.push(format!("{pubkey}:{kind_str}:{d_tag}"));
-                            }
-                        }
+            if let Some(tag_arr) = tag.as_array()
+                && tag_arr.len() >= 2
+                && tag_arr[0].as_str() == Some("a")
+                && let Some(coord) = tag_arr[1].as_str()
+            {
+                // Coordenada formato NIP-33: "kind:pubkey" ou "kind:pubkey:d_tag"
+                // Converter para o formato de replacement_key: "pubkey:kind" ou "pubkey:kind:d_tag"
+                let parts: Vec<&str> = coord.splitn(3, ':').collect();
+                if parts.len() >= 2 {
+                    let kind_str = parts[0];
+                    let pubkey = parts[1];
+                    let d_tag = parts.get(2).copied().unwrap_or("");
+                    if d_tag.is_empty() {
+                        keys.push(format!("{pubkey}:{kind_str}"));
+                    } else {
+                        keys.push(format!("{pubkey}:{kind_str}:{d_tag}"));
                     }
                 }
             }
@@ -145,6 +147,7 @@ pub fn extract_expiration(event: &Value) -> Option<u64> {
 
 /// Verifica se um evento está expirado em relação ao instante `now_ts` (timestamp Unix).
 /// Retorna `true` se o evento tem tag `expiration` e o valor é <= `now_ts`.
+#[allow(dead_code)]
 pub fn is_expired(event: &Value, now_ts: u64) -> bool {
     match extract_expiration(event) {
         Some(exp) => exp <= now_ts,
@@ -262,14 +265,20 @@ mod tests {
             "pubkey": "pub_alice",
             "created_at": 1000
         });
-        assert_eq!(replacement_key(&normal_rep), Some("pub_alice:0".to_string()));
+        assert_eq!(
+            replacement_key(&normal_rep),
+            Some("pub_alice:0".to_string())
+        );
 
         let param_rep = json!({
             "kind": 30001,
             "pubkey": "pub_bob",
             "tags": [["d", "list-1"]]
         });
-        assert_eq!(replacement_key(&param_rep), Some("pub_bob:30001:list-1".to_string()));
+        assert_eq!(
+            replacement_key(&param_rep),
+            Some("pub_bob:30001:list-1".to_string())
+        );
 
         let text_note = json!({
             "kind": 1,
@@ -302,15 +311,27 @@ mod tests {
         let now = 1_700_000_000u64;
 
         let expired_event = json!({"kind": 1, "tags": [["expiration", "1699999999"]]});
-        assert!(is_expired(&expired_event, now), "Event with past expiration must be expired");
+        assert!(
+            is_expired(&expired_event, now),
+            "Event with past expiration must be expired"
+        );
 
         let at_boundary = json!({"kind": 1, "tags": [["expiration", "1700000000"]]});
-        assert!(is_expired(&at_boundary, now), "Event with expiration == now must be considered expired");
+        assert!(
+            is_expired(&at_boundary, now),
+            "Event with expiration == now must be considered expired"
+        );
 
         let future_event = json!({"kind": 1, "tags": [["expiration", "1700000001"]]});
-        assert!(!is_expired(&future_event, now), "Event with future expiration must NOT be expired");
+        assert!(
+            !is_expired(&future_event, now),
+            "Event with future expiration must NOT be expired"
+        );
 
         let no_expiry = json!({"kind": 1, "tags": []});
-        assert!(!is_expired(&no_expiry, now), "Event without expiration tag must never be expired");
+        assert!(
+            !is_expired(&no_expiry, now),
+            "Event without expiration tag must never be expired"
+        );
     }
 }

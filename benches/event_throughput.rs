@@ -1,12 +1,11 @@
 //! Criterion benchmark suite for Goy Node event processing & replication throughput.
 
-use criterion::{criterion_group, criterion_main, Criterion, Throughput};
+use criterion::{Criterion, Throughput, criterion_group, criterion_main};
 use dashmap::DashSet;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
 use goy_node::consistent_hash::ConsistentHashRing;
-use goy_node::mesh::select_replication_peers;
 use goy_node::metrics::Metrics;
 
 fn bench_event_dedup(c: &mut Criterion) {
@@ -29,9 +28,7 @@ fn bench_event_dedup(c: &mut Criterion) {
     });
 
     group.bench_function("dashset_contains_lookup", |b| {
-        b.iter(|| {
-            seen_ids.contains("prefilled_evt_5000")
-        })
+        b.iter(|| seen_ids.contains("prefilled_evt_5000"))
     });
 
     group.finish();
@@ -48,15 +45,11 @@ fn bench_hash_ring_lookup(c: &mut Criterion) {
     group.throughput(Throughput::Elements(1));
 
     group.bench_function("get_responsible_peers_rf3", |b| {
-        b.iter(|| {
-            ring.get_responsible_peers("evt_benchmark_key_12345", 3)
-        })
+        b.iter(|| ring.get_responsible_peers("evt_benchmark_key_12345", 3))
     });
 
     group.bench_function("get_primary_peer", |b| {
-        b.iter(|| {
-            ring.get_primary_peer("evt_benchmark_key_12345")
-        })
+        b.iter(|| ring.get_primary_peer("evt_benchmark_key_12345"))
     });
 
     group.finish();
@@ -77,5 +70,10 @@ fn bench_metrics_counters(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_event_dedup, bench_hash_ring_lookup, bench_metrics_counters);
+criterion_group!(
+    benches,
+    bench_event_dedup,
+    bench_hash_ring_lookup,
+    bench_metrics_counters
+);
 criterion_main!(benches);

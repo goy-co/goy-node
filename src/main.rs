@@ -32,7 +32,10 @@ async fn main() -> anyhow::Result<()> {
     let cli = cli::Cli::parse();
 
     // ── Logging estruturado (silenciar logs normais para subcomandos de consulta se não for Run) ──
-    let is_query_cmd = cli.command.as_ref().map_or(false, |c| c != &cli::Commands::Run);
+    let is_query_cmd = cli
+        .command
+        .as_ref()
+        .is_some_and(|c| c != &cli::Commands::Run);
     let default_filter = if is_query_cmd { "warn" } else { "info" };
 
     fmt()
@@ -87,7 +90,9 @@ async fn cmd_run(
 
     // ── Verificação de Onboarding (Graceful Degradation) ───────────────
     if onboard::check_onboard_status(Some(&data_dir)).is_none() {
-        tracing::warn!("⚠️ Node not onboarded. Run 'goy-node onboard' first to join Goy VPN platform.");
+        tracing::warn!(
+            "⚠️ Node not onboarded. Run 'goy-node onboard' first to join Goy VPN platform."
+        );
     } else {
         info!("✅ Node is onboarded on Goy VPN platform");
     }

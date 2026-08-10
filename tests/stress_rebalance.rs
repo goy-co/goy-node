@@ -20,7 +20,6 @@ async fn free_addr() -> String {
 async fn test_stress_rebalance_node_addition() -> anyhow::Result<()> {
     let mut ring = ConsistentHashRing::new(150);
 
-    // Initial 5 nodes
     for i in 0..5 {
         ring.add_peer(&format!("node-{i}"));
     }
@@ -32,7 +31,6 @@ async fn test_stress_rebalance_node_addition() -> anyhow::Result<()> {
         .map(|i| ring.get_primary_peer(&format!("evt_key_{i}")).unwrap())
         .collect();
 
-    // Add 6th node
     ring.add_peer("node-5");
     assert_eq!(ring.peer_count(), 6);
 
@@ -69,14 +67,19 @@ async fn test_stress_rebalance_mesh_agent_cluster() -> anyhow::Result<()> {
     let mut handles = Vec::new();
 
     for i in 0..3 {
-        let mut cfg = MeshConfig::default();
-        cfg.listen = addrs[i].clone();
-        cfg.tls_enabled = false;
-        cfg.replication_factor = 3;
+        let seeds = if i > 0 {
+            vec![format!("ws://{}", addrs[i - 1])]
+        } else {
+            vec![]
+        };
 
-        if i > 0 {
-            cfg.seeds = vec![format!("ws://{}", addrs[i - 1])];
-        }
+        let cfg = MeshConfig {
+            listen: addrs[i].clone(),
+            seeds,
+            tls_enabled: false,
+            replication_factor: 3,
+            ..MeshConfig::default()
+        };
 
         let (_relay_events_tx, relay_events_rx) = broadcast::channel::<RelayEvent>(16);
         let (relay_publish_tx, _relay_publish_rx) = tokio::sync::mpsc::channel::<String>(16);

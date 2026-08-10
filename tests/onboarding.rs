@@ -1,8 +1,8 @@
 //! Integration and unit tests for Goy Node Onboarding & Offboarding workflows.
 
-use tempfile::tempdir;
 use goy_node::goy_api::validate_auth_key;
 use goy_node::onboard::{check_onboard_status, run_offboard, run_onboard};
+use tempfile::tempdir;
 
 #[test]
 fn test_auth_key_validation_rules() {
@@ -40,9 +40,18 @@ async fn test_onboard_non_interactive_vpn_only_flow() -> anyhow::Result<()> {
 
     // Verificar que os ficheiros foram criados
     assert!(config_path.exists(), "config.toml must be generated");
-    assert!(data_dir.join("onboard_state.json").exists(), "onboard_state.json must exist");
-    assert!(data_dir.join("vpn_state.json").exists(), "vpn_state.json must exist");
-    assert!(data_dir.join("node_id.txt").exists(), "node_id.txt must exist");
+    assert!(
+        data_dir.join("onboard_state.json").exists(),
+        "onboard_state.json must exist"
+    );
+    assert!(
+        data_dir.join("vpn_state.json").exists(),
+        "vpn_state.json must exist"
+    );
+    assert!(
+        data_dir.join("node_id.txt").exists(),
+        "node_id.txt must exist"
+    );
 
     // Verificar leitura do estado
     let status = check_onboard_status(Some(&data_dir));

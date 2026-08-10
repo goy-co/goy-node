@@ -31,7 +31,15 @@ async fn test_outbound_seed_reconnect_and_sync() -> anyhow::Result<()> {
 
     let cancel_a = cancel.clone();
     tokio::spawn(async move {
-        let _ = goy_node::mesh::run(cfg_a, "ws://127.0.0.1:57777".to_string(), None, relay_events_rx_a, relay_publish_tx_a, cancel_a).await;
+        let _ = goy_node::mesh::run(
+            cfg_a,
+            "ws://127.0.0.1:57777".to_string(),
+            None,
+            relay_events_rx_a,
+            relay_publish_tx_a,
+            cancel_a,
+        )
+        .await;
     });
 
     // ── Node B (seeds = Node A) ──────────
@@ -46,7 +54,15 @@ async fn test_outbound_seed_reconnect_and_sync() -> anyhow::Result<()> {
 
     let cancel_b = cancel.clone();
     tokio::spawn(async move {
-        let _ = goy_node::mesh::run(cfg_b, "ws://127.0.0.1:57777".to_string(), None, relay_events_rx_b, relay_publish_tx_b, cancel_b).await;
+        let _ = goy_node::mesh::run(
+            cfg_b,
+            "ws://127.0.0.1:57777".to_string(),
+            None,
+            relay_events_rx_b,
+            relay_publish_tx_b,
+            cancel_b,
+        )
+        .await;
     });
 
     // Aguarda o Node B fazer a conexão outbound para o Node A
@@ -127,11 +143,41 @@ async fn test_mesh_deduplication_triangle_loop() -> anyhow::Result<()> {
     };
 
     let c_a = cancel.clone();
-    tokio::spawn(async move { let _ = goy_node::mesh::run(cfg_a, "ws://127.0.0.1:57777".to_string(), None, relay_events_rx_a, relay_publish_tx_a, c_a).await; });
+    tokio::spawn(async move {
+        let _ = goy_node::mesh::run(
+            cfg_a,
+            "ws://127.0.0.1:57777".to_string(),
+            None,
+            relay_events_rx_a,
+            relay_publish_tx_a,
+            c_a,
+        )
+        .await;
+    });
     let c_b = cancel.clone();
-    tokio::spawn(async move { let _ = goy_node::mesh::run(cfg_b, "ws://127.0.0.1:57777".to_string(), None, relay_events_rx_b, relay_publish_tx_b, c_b).await; });
+    tokio::spawn(async move {
+        let _ = goy_node::mesh::run(
+            cfg_b,
+            "ws://127.0.0.1:57777".to_string(),
+            None,
+            relay_events_rx_b,
+            relay_publish_tx_b,
+            c_b,
+        )
+        .await;
+    });
     let c_c = cancel.clone();
-    tokio::spawn(async move { let _ = goy_node::mesh::run(cfg_c, "ws://127.0.0.1:57777".to_string(), None, relay_events_rx_c, relay_publish_tx_c, c_c).await; });
+    tokio::spawn(async move {
+        let _ = goy_node::mesh::run(
+            cfg_c,
+            "ws://127.0.0.1:57777".to_string(),
+            None,
+            relay_events_rx_c,
+            relay_publish_tx_c,
+            c_c,
+        )
+        .await;
+    });
 
     tokio::time::sleep(Duration::from_millis(500)).await;
 

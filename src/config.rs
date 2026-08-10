@@ -161,7 +161,10 @@ impl Config {
                 std::fs::create_dir_all(parent)?;
             }
             std::fs::write(path, DEFAULT_CONFIG_TEMPLATE)?;
-            info!("📝 Generated default config at {}. Edit to customize.", path.display());
+            info!(
+                "📝 Generated default config at {}. Edit to customize.",
+                path.display()
+            );
         }
 
         let contents = std::fs::read_to_string(path)?;
@@ -214,18 +217,18 @@ impl Config {
             self.mesh.registry_url = Some(reg);
         }
 
-        if let Ok(secs_raw) = std::env::var("GOY_NODE_MESH_HEARTBEAT_SECS") {
-            if let Ok(secs) = secs_raw.parse::<u64>() {
-                info!("🔧 Override from env GOY_NODE_MESH_HEARTBEAT_SECS: {secs}");
-                self.mesh.heartbeat_secs = secs;
-            }
+        if let Ok(secs_raw) = std::env::var("GOY_NODE_MESH_HEARTBEAT_SECS")
+            && let Ok(secs) = secs_raw.parse::<u64>()
+        {
+            info!("🔧 Override from env GOY_NODE_MESH_HEARTBEAT_SECS: {secs}");
+            self.mesh.heartbeat_secs = secs;
         }
 
-        if let Ok(secs_raw) = std::env::var("GOY_NODE_MESH_DISCOVERY_SECS") {
-            if let Ok(secs) = secs_raw.parse::<u64>() {
-                info!("🔧 Override from env GOY_NODE_MESH_DISCOVERY_SECS: {secs}");
-                self.mesh.discovery_secs = secs;
-            }
+        if let Ok(secs_raw) = std::env::var("GOY_NODE_MESH_DISCOVERY_SECS")
+            && let Ok(secs) = secs_raw.parse::<u64>()
+        {
+            info!("🔧 Override from env GOY_NODE_MESH_DISCOVERY_SECS: {secs}");
+            self.mesh.discovery_secs = secs;
         }
 
         if let Ok(url) = std::env::var("GOY_NODE_MESH_URL") {
@@ -238,45 +241,48 @@ impl Config {
             self.mesh.node_id = Some(id);
         }
 
-        if let Ok(rf_raw) = std::env::var("GOY_NODE_REPLICATION_FACTOR") {
-            if let Ok(rf) = rf_raw.parse::<u32>() {
-                info!("🔧 Override from env GOY_NODE_REPLICATION_FACTOR: {rf}");
-                self.mesh.replication_factor = rf;
-            }
+        if let Ok(rf_raw) = std::env::var("GOY_NODE_REPLICATION_FACTOR")
+            && let Ok(rf) = rf_raw.parse::<u32>()
+        {
+            info!("🔧 Override from env GOY_NODE_REPLICATION_FACTOR: {rf}");
+            self.mesh.replication_factor = rf;
         }
 
-        if let Ok(vn_raw) = std::env::var("GOY_NODE_VNODES_PER_PEER") {
-            if let Ok(vn) = vn_raw.parse::<u32>() {
-                info!("🔧 Override from env GOY_NODE_VNODES_PER_PEER: {vn}");
-                self.mesh.vnodes_per_peer = vn;
-            }
+        if let Ok(vn_raw) = std::env::var("GOY_NODE_VNODES_PER_PEER")
+            && let Ok(vn) = vn_raw.parse::<u32>()
+        {
+            info!("🔧 Override from env GOY_NODE_VNODES_PER_PEER: {vn}");
+            self.mesh.vnodes_per_peer = vn;
         }
 
-        if let Ok(v_raw) = std::env::var("GOY_NODE_MAX_EVENTS_PER_SEC") {
-            if let Ok(v) = v_raw.parse::<u32>() {
-                info!("🔧 Override from env GOY_NODE_MAX_EVENTS_PER_SEC: {v}");
-                self.mesh.max_events_per_second_per_peer = v;
-            }
+        if let Ok(v_raw) = std::env::var("GOY_NODE_MAX_EVENTS_PER_SEC")
+            && let Ok(v) = v_raw.parse::<u32>()
+        {
+            info!("🔧 Override from env GOY_NODE_MAX_EVENTS_PER_SEC: {v}");
+            self.mesh.max_events_per_second_per_peer = v;
         }
 
-        if let Ok(v_raw) = std::env::var("GOY_NODE_MAX_BYTES_PER_SEC") {
-            if let Ok(v) = v_raw.parse::<u64>() {
-                info!("🔧 Override from env GOY_NODE_MAX_BYTES_PER_SEC: {v}");
-                self.mesh.max_bytes_per_second_per_peer = v;
-            }
+        if let Ok(v_raw) = std::env::var("GOY_NODE_MAX_BYTES_PER_SEC")
+            && let Ok(v) = v_raw.parse::<u64>()
+        {
+            info!("🔧 Override from env GOY_NODE_MAX_BYTES_PER_SEC: {v}");
+            self.mesh.max_bytes_per_second_per_peer = v;
         }
 
         if let Ok(v_raw) = std::env::var("GOY_NODE_TLS_ENABLED") {
-            let enabled = matches!(v_raw.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on");
+            let enabled = matches!(
+                v_raw.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            );
             info!("🔧 Override from env GOY_NODE_TLS_ENABLED: {enabled}");
             self.mesh.tls_enabled = enabled;
         }
 
-        if let Ok(v_raw) = std::env::var("GOY_NODE_MAX_MSG_SIZE") {
-            if let Ok(v) = v_raw.parse::<usize>() {
-                info!("🔧 Override from env GOY_NODE_MAX_MSG_SIZE: {v}");
-                self.mesh.max_message_size = v;
-            }
+        if let Ok(v_raw) = std::env::var("GOY_NODE_MAX_MSG_SIZE")
+            && let Ok(v) = v_raw.parse::<usize>()
+        {
+            info!("🔧 Override from env GOY_NODE_MAX_MSG_SIZE: {v}");
+            self.mesh.max_message_size = v;
         }
 
         if let Ok(listen) = std::env::var("GOY_NODE_METRICS_LISTEN") {
@@ -315,13 +321,13 @@ impl Config {
         }
 
         // 3. Valida metrics.listen se definido
-        if let Some(ref listen) = self.metrics.listen {
-            if listen.parse::<SocketAddr>().is_err() {
-                anyhow::bail!(
-                    "Invalid metrics.listen '{}': must be a valid socket address (e.g. '127.0.0.1:9090')",
-                    listen
-                );
-            }
+        if let Some(ref listen) = self.metrics.listen
+            && listen.parse::<SocketAddr>().is_err()
+        {
+            anyhow::bail!(
+                "Invalid metrics.listen '{}': must be a valid socket address (e.g. '127.0.0.1:9090')",
+                listen
+            );
         }
 
         // 3. Valida mesh.seeds
@@ -424,45 +430,41 @@ pub fn detect_mesh_url(listen_addr: &str, override_url: Option<&str>) -> String 
     if let Ok(output) = std::process::Command::new("tailscale")
         .args(["status", "--json"])
         .output()
+        && output.status.success()
+        && let Ok(json) = serde_json::from_slice::<serde_json::Value>(&output.stdout)
+        && let Some(self_node) = json.get("Self")
     {
-        if output.status.success() {
-            if let Ok(json) = serde_json::from_slice::<serde_json::Value>(&output.stdout) {
-                if let Some(self_node) = json.get("Self") {
-                    if let Some(dns_name) = self_node.get("DNSName").and_then(|v| v.as_str()) {
-                        let clean_dns = dns_name.trim_end_matches('.');
-                        if !clean_dns.is_empty() {
-                            let url = format!("ws://{clean_dns}:{port}");
-                            info!("🌐 Mesh URL auto-detected via Tailscale MagicDNS: {url}");
-                            return url;
-                        }
-                    }
-                    if let Some(ips) = self_node.get("TailscaleIPs").and_then(|v| v.as_array()) {
-                        for ip in ips {
-                            if let Some(ip_str) = ip.as_str() {
-                                if ip_str.starts_with("100.") {
-                                    let url = format!("ws://{ip_str}:{port}");
-                                    info!("🌐 Mesh URL auto-detected via Tailscale IP: {url}");
-                                    return url;
-                                }
-                            }
-                        }
-                    }
+        if let Some(dns_name) = self_node.get("DNSName").and_then(|v| v.as_str()) {
+            let clean_dns = dns_name.trim_end_matches('.');
+            if !clean_dns.is_empty() {
+                let url = format!("ws://{clean_dns}:{port}");
+                info!("🌐 Mesh URL auto-detected via Tailscale MagicDNS: {url}");
+                return url;
+            }
+        }
+        if let Some(ips) = self_node.get("TailscaleIPs").and_then(|v| v.as_array()) {
+            for ip in ips {
+                if let Some(ip_str) = ip.as_str()
+                    && ip_str.starts_with("100.")
+                {
+                    let url = format!("ws://{ip_str}:{port}");
+                    info!("🌐 Mesh URL auto-detected via Tailscale IP: {url}");
+                    return url;
                 }
             }
         }
     }
 
     // 2. Fallback: IP não-loopback da interface de rede (via UDP probe)
-    if let Ok(socket) = std::net::UdpSocket::bind("0.0.0.0:0") {
-        if socket.connect("1.1.1.1:80").is_ok() {
-            if let Ok(addr) = socket.local_addr() {
-                let ip = addr.ip();
-                if !ip.is_loopback() {
-                    let url = format!("ws://{ip}:{port}");
-                    info!("🌐 Mesh URL auto-detected via local interface IP: {url}");
-                    return url;
-                }
-            }
+    if let Ok(socket) = std::net::UdpSocket::bind("0.0.0.0:0")
+        && socket.connect("1.1.1.1:80").is_ok()
+        && let Ok(addr) = socket.local_addr()
+    {
+        let ip = addr.ip();
+        if !ip.is_loopback() {
+            let url = format!("ws://{ip}:{port}");
+            info!("🌐 Mesh URL auto-detected via local interface IP: {url}");
+            return url;
         }
     }
 
@@ -509,7 +511,11 @@ mod tests {
         cfg.relay.url = "http://127.0.0.1:7777".to_string();
         let res = cfg.validate();
         assert!(res.is_err());
-        assert!(res.unwrap_err().to_string().contains("must start with 'ws://' or 'wss://'"));
+        assert!(
+            res.unwrap_err()
+                .to_string()
+                .contains("must start with 'ws://' or 'wss://'")
+        );
     }
 
     #[test]
@@ -518,7 +524,11 @@ mod tests {
         cfg.mesh.listen = "invalid_address".to_string();
         let res = cfg.validate();
         assert!(res.is_err());
-        assert!(res.unwrap_err().to_string().contains("must be a valid socket address"));
+        assert!(
+            res.unwrap_err()
+                .to_string()
+                .contains("must be a valid socket address")
+        );
     }
 
     #[test]
@@ -527,7 +537,11 @@ mod tests {
         cfg.mesh.seeds = vec!["invalid_seed_url".to_string()];
         let res = cfg.validate();
         assert!(res.is_err());
-        assert!(res.unwrap_err().to_string().contains("must start with 'ws://' or 'wss://'"));
+        assert!(
+            res.unwrap_err()
+                .to_string()
+                .contains("must start with 'ws://' or 'wss://'")
+        );
     }
 
     #[test]
@@ -536,7 +550,11 @@ mod tests {
         cfg.mesh.heartbeat_secs = 0;
         let res = cfg.validate();
         assert!(res.is_err());
-        assert!(res.unwrap_err().to_string().contains("must be greater than 0"));
+        assert!(
+            res.unwrap_err()
+                .to_string()
+                .contains("must be greater than 0")
+        );
     }
 
     #[test]
@@ -545,7 +563,11 @@ mod tests {
         cfg.mesh.discovery_secs = 0;
         let res = cfg.validate();
         assert!(res.is_err());
-        assert!(res.unwrap_err().to_string().contains("must be greater than 0"));
+        assert!(
+            res.unwrap_err()
+                .to_string()
+                .contains("must be greater than 0")
+        );
     }
 
     #[test]
@@ -583,7 +605,10 @@ mod tests {
         assert_eq!(cfg.mesh.seeds, vec!["ws://seed1:8443", "ws://seed2:8443"]);
         assert_eq!(cfg.mesh.heartbeat_secs, 15);
         assert_eq!(cfg.mesh.discovery_secs, 45);
-        assert_eq!(cfg.mesh.mesh_url, Some("ws://override.tailnet:8443".to_string()));
+        assert_eq!(
+            cfg.mesh.mesh_url,
+            Some("ws://override.tailnet:8443".to_string())
+        );
         assert_eq!(cfg.mesh.node_id, Some("node-override-id".to_string()));
         assert_eq!(cfg.mesh.replication_factor, 5);
         assert!(cfg.validate().is_ok());

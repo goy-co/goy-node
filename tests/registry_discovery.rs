@@ -94,7 +94,11 @@ impl MockRegistry {
             }
         });
 
-        Ok(Self { url, relays, cancel })
+        Ok(Self {
+            url,
+            relays,
+            cancel,
+        })
     }
 
     pub fn stop(&self) {
@@ -129,7 +133,15 @@ async fn test_registry_client_http_ops() -> anyhow::Result<()> {
 
     // 3. Heartbeat PUT /relays/{node_id}
     client.heartbeat("node-test-1").await?;
-    assert!(mock.relays.lock().unwrap().get("node-test-1").unwrap().last_seen.is_some());
+    assert!(
+        mock.relays
+            .lock()
+            .unwrap()
+            .get("node-test-1")
+            .unwrap()
+            .last_seen
+            .is_some()
+    );
 
     // 4. Deregister DELETE /relays/{node_id}
     client.deregister("node-test-1").await?;
@@ -173,7 +185,15 @@ async fn test_three_nodes_dynamic_discovery_full_mesh() -> anyhow::Result<()> {
 
     let c_a = cancel.clone();
     tokio::spawn(async move {
-        let _ = goy_node::mesh::run(cfg_a, "ws://127.0.0.1:57777".to_string(), None, relay_events_rx_a, relay_publish_tx_a, c_a).await;
+        let _ = goy_node::mesh::run(
+            cfg_a,
+            "ws://127.0.0.1:57777".to_string(),
+            None,
+            relay_events_rx_a,
+            relay_publish_tx_a,
+            c_a,
+        )
+        .await;
     });
 
     // Node B
@@ -192,7 +212,15 @@ async fn test_three_nodes_dynamic_discovery_full_mesh() -> anyhow::Result<()> {
 
     let c_b = cancel.clone();
     tokio::spawn(async move {
-        let _ = goy_node::mesh::run(cfg_b, "ws://127.0.0.1:57777".to_string(), None, relay_events_rx_b, relay_publish_tx_b, c_b).await;
+        let _ = goy_node::mesh::run(
+            cfg_b,
+            "ws://127.0.0.1:57777".to_string(),
+            None,
+            relay_events_rx_b,
+            relay_publish_tx_b,
+            c_b,
+        )
+        .await;
     });
 
     // Aguarda Node A e Node B registarem no registry
@@ -214,7 +242,15 @@ async fn test_three_nodes_dynamic_discovery_full_mesh() -> anyhow::Result<()> {
 
     let c_c = cancel.clone();
     tokio::spawn(async move {
-        let _ = goy_node::mesh::run(cfg_c, "ws://127.0.0.1:57777".to_string(), None, relay_events_rx_c, relay_publish_tx_c, c_c).await;
+        let _ = goy_node::mesh::run(
+            cfg_c,
+            "ws://127.0.0.1:57777".to_string(),
+            None,
+            relay_events_rx_c,
+            relay_publish_tx_c,
+            c_c,
+        )
+        .await;
     });
 
     // Aguarda Node C descobrir A e B via registry e conectar automaticamente
@@ -276,7 +312,15 @@ async fn test_registry_resilience_outage_and_recovery() -> anyhow::Result<()> {
     let c_a = cancel.clone();
     let dir_a1 = data_dir_a.clone();
     tokio::spawn(async move {
-        let _ = goy_node::mesh::run(cfg_a, "ws://127.0.0.1:57777".to_string(), Some(dir_a1), relay_events_rx_a, relay_publish_tx_a, c_a).await;
+        let _ = goy_node::mesh::run(
+            cfg_a,
+            "ws://127.0.0.1:57777".to_string(),
+            Some(dir_a1),
+            relay_events_rx_a,
+            relay_publish_tx_a,
+            c_a,
+        )
+        .await;
     });
 
     // Node B
@@ -296,7 +340,15 @@ async fn test_registry_resilience_outage_and_recovery() -> anyhow::Result<()> {
     let c_b = cancel.clone();
     let dir_a2 = data_dir_a.clone();
     tokio::spawn(async move {
-        let _ = goy_node::mesh::run(cfg_b, "ws://127.0.0.1:57777".to_string(), Some(dir_a2), relay_events_rx_b, relay_publish_tx_b, c_b).await;
+        let _ = goy_node::mesh::run(
+            cfg_b,
+            "ws://127.0.0.1:57777".to_string(),
+            Some(dir_a2),
+            relay_events_rx_b,
+            relay_publish_tx_b,
+            c_b,
+        )
+        .await;
     });
 
     // Aguarda descobrirem-se
@@ -315,7 +367,10 @@ async fn test_registry_resilience_outage_and_recovery() -> anyhow::Result<()> {
     let rec_b = tokio::time::timeout(Duration::from_secs(3), relay_publish_rx_b.recv())
         .await?
         .ok_or_else(|| anyhow::anyhow!("Node B did not receive event during registry outage"))?;
-    assert_eq!(rec_b, r#"["EVENT",{"id":"evt_resilience_1","content":"mesh operational"}]"#);
+    assert_eq!(
+        rec_b,
+        r#"["EVENT",{"id":"evt_resilience_1","content":"mesh operational"}]"#
+    );
 
     cancel.cancel();
     Ok(())

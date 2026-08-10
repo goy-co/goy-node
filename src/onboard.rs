@@ -1,7 +1,7 @@
 //! Lógica de onboarding e offboarding do Goy Node na plataforma e VPN da Goy Company.
 
-use sha2::Digest;
 use serde::{Deserialize, Serialize};
+use sha2::Digest;
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -9,7 +9,7 @@ use std::process::Command;
 use tracing::{error, info, warn};
 
 use crate::config::DEFAULT_CONFIG_TEMPLATE;
-use crate::goy_api::{validate_auth_key, GoyApiClient};
+use crate::goy_api::{GoyApiClient, validate_auth_key};
 
 /// Estado persistido de onboarding (`data_dir/onboard_state.json`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -44,26 +44,30 @@ pub fn check_onboard_status(data_dir: Option<&Path>) -> Option<OnboardState> {
 /// Tenta auto-detectar o `mesh_url` a partir da CLI do Tailscale/Headscale ou interfaces de rede VPN.
 pub fn detect_vpn_mesh_url() -> Option<String> {
     // 1. Tentar `tailscale ip -4`
-    if let Ok(output) = Command::new("tailscale").arg("ip").arg("-4").output() {
-        if output.status.success() {
-            let ip = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            if !ip.is_empty() {
-                return Some(format!("ws://{ip}:8443"));
-            }
+    if let Ok(output) = Command::new("tailscale").arg("ip").arg("-4").output()
+        && output.status.success()
+    {
+        let ip = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if !ip.is_empty() {
+            return Some(format!("ws://{ip}:8443"));
         }
     }
 
     // 2. Tentar `tailscale status --json` para extrair MagicDNS ou Self IP
-    if let Ok(output) = Command::new("tailscale").arg("status").arg("--json").output() {
-        if output.status.success() {
-            if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&output.stdout) {
-                if let Some(dns) = v.get("Self").and_then(|s| s.get("DNSName")).and_then(|d| d.as_str()) {
-                    let dns_trimmed = dns.trim_end_matches('.');
-                    if !dns_trimmed.is_empty() {
-                        return Some(format!("ws://{dns_trimmed}:8443"));
-                    }
-                }
-            }
+    if let Ok(output) = Command::new("tailscale")
+        .arg("status")
+        .arg("--json")
+        .output()
+        && output.status.success()
+        && let Ok(v) = serde_json::from_slice::<serde_json::Value>(&output.stdout)
+        && let Some(dns) = v
+            .get("Self")
+            .and_then(|s| s.get("DNSName"))
+            .and_then(|d| d.as_str())
+    {
+        let dns_trimmed = dns.trim_end_matches('.');
+        if !dns_trimmed.is_empty() {
+            return Some(format!("ws://{dns_trimmed}:8443"));
         }
     }
 
@@ -97,7 +101,9 @@ pub async fn run_onboard(
     };
 
     if !validate_auth_key(&auth_key) {
-        error!("❌ Invalid auth key format. Key must start with 'gc_' and have at least 10 characters.");
+        error!(
+            "❌ Invalid auth key format. Key must start with 'gc_' and have at least 10 characters."
+        );
         return Ok(2);
     }
 
@@ -109,7 +115,10 @@ pub async fn run_onboard(
     let (registered_node_id, vpn_key_to_use, bearer_token) = if !vpn_only {
         match api_client.register_node(&auth_key, Some(&node_id)).await {
             Ok(res) => {
-                info!("✅ Successfully registered node {} with Goy Company API!", res.node_id);
+                info!(
+                    "✅ Successfully registered node {} with Goy Company API!",
+                    res.node_id
+                );
                 (
                     res.node_id,
                     res.vpn_auth_key.unwrap_or_else(|| auth_key.clone()),
@@ -159,7 +168,9 @@ pub async fn run_onboard(
     } else {
         warn!("⚠️ Tailscale/Headscale CLI is not installed on this system.");
         if !non_interactive {
-            info!("💡 Please install Tailscale manually from https://tailscale.com/download to join the Goy mesh network.");
+            info!(
+                "💡 Please install Tailscale manually from https://tailscale.com/download to join the Goy mesh network."
+            );
         }
     }
 
@@ -213,7 +224,11 @@ pub async fn run_onboard(
     let vpn_state = VpnState {
         vpn_ip: Some(target_mesh_url.clone()),
         magic_dns: None,
-        client_type: if tailscale_available { "tailscale".to_string() } else { "none".to_string() },
+        client_type: if tailscale_available {
+            "tailscale".to_string()
+        } else {
+            "none".to_string()
+        },
         configured_at: now,
     };
 
@@ -230,12 +245,16 @@ pub async fn run_onboard(
     let config_content = if cfg_file_path.exists() {
         let existing = fs::read_to_string(&cfg_file_path)?;
         if !existing.contains("mesh_url") {
-            format!("{existing}\nmesh_url = \"{target_mesh_url}\"\nnode_id = \"{registered_node_id}\"\n")
+            format!(
+                "{existing}\nmesh_url = \"{target_mesh_url}\"\nnode_id = \"{registered_node_id}\"\n"
+            )
         } else {
             existing
         }
     } else {
-        format!("{DEFAULT_CONFIG_TEMPLATE}\nmesh_url = \"{target_mesh_url}\"\nnode_id = \"{registered_node_id}\"\n")
+        format!(
+            "{DEFAULT_CONFIG_TEMPLATE}\nmesh_url = \"{target_mesh_url}\"\nnode_id = \"{registered_node_id}\"\n"
+        )
     };
 
     fs::write(&cfg_file_path, config_content)?;
@@ -274,12 +293,12 @@ pub async fn run_offboard(
     }
 
     // 1. Deregistar da API Goy Company
-    if let Some(ref st) = onboard_state {
-        if let Some(ref token) = st.bearer_token {
-            let api_url = std::env::var("GOY_API_URL").ok();
-            let api_client = GoyApiClient::new(api_url.as_deref());
-            let _ = api_client.deregister_node(token, &st.node_id).await;
-        }
+    if let Some(ref st) = onboard_state
+        && let Some(ref token) = st.bearer_token
+    {
+        let api_url = std::env::var("GOY_API_URL").ok();
+        let api_client = GoyApiClient::new(api_url.as_deref());
+        let _ = api_client.deregister_node(token, &st.node_id).await;
     }
 
     // 2. Logout na Tailscale / VPN se disponível

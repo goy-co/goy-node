@@ -59,16 +59,20 @@ async fn test_five_nodes_consistent_hashing_sync() -> anyhow::Result<()> {
     let mut handles = Vec::new();
 
     for i in 0..5 {
-        let mut cfg = MeshConfig::default();
-        cfg.listen = node_addrs[i].clone();
-        cfg.tls_enabled = false;
-        cfg.replication_factor = 3;
-        cfg.vnodes_per_peer = 150;
+        let seeds = if i > 0 {
+            vec![format!("ws://{}", node_addrs[i - 1])]
+        } else {
+            vec![]
+        };
 
-        // Seed to previous node
-        if i > 0 {
-            cfg.seeds = vec![format!("ws://{}", node_addrs[i - 1])];
-        }
+        let cfg = MeshConfig {
+            listen: node_addrs[i].clone(),
+            seeds,
+            tls_enabled: false,
+            replication_factor: 3,
+            vnodes_per_peer: 150,
+            ..MeshConfig::default()
+        };
 
         let (_relay_events_tx, relay_events_rx) = broadcast::channel::<RelayEvent>(16);
         let (relay_publish_tx, _relay_publish_rx) = tokio::sync::mpsc::channel::<String>(16);

@@ -198,7 +198,7 @@ async fn publisher_session(
                     format!(r#"["EVENT",{}]"#, event_json)
                 };
 
-                if ws.send(Message::Text(to_send.into())).await.is_err() {
+                if ws.send(Message::Text(to_send)).await.is_err() {
                     anyhow::bail!("publisher websocket send failed");
                 }
 

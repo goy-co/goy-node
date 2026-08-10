@@ -134,9 +134,7 @@ async fn handle_connection(
             } else {
                 (503, "degraded")
             };
-            let body = format!(
-                r#"{{"status":"{status_str}","peers":{peers},"uptime":{uptime}}}"#
-            );
+            let body = format!(r#"{{"status":"{status_str}","peers":{peers},"uptime":{uptime}}}"#);
             (status, "application/json", body.into_bytes())
         }
         "/peers" => {
@@ -149,7 +147,11 @@ async fn handle_connection(
         }
         "/info" => {
             let fp = node_info.cert_fingerprint.as_deref().unwrap_or("null");
-            let fp_str = if fp == "null" { "null".to_string() } else { format!("\"{fp}\"") };
+            let fp_str = if fp == "null" {
+                "null".to_string()
+            } else {
+                format!("\"{fp}\"")
+            };
             let body = format!(
                 r#"{{"version":"{}","node_id":"{}","cert_fingerprint":{},"relay_url":"{}","mesh_listen":"{}","replication_factor":{},"tls_enabled":{}}}"#,
                 escape_json(&node_info.version),
@@ -162,11 +164,7 @@ async fn handle_connection(
             );
             (200, "application/json", body.into_bytes())
         }
-        _ => (
-            404,
-            "text/plain",
-            b"404 Not Found\n".to_vec(),
-        ),
+        _ => (404, "text/plain", b"404 Not Found\n".to_vec()),
     };
 
     let reason = match status {
@@ -227,7 +225,10 @@ mod tests {
             .and_then(|code| code.parse::<u16>().ok())
             .unwrap_or(0);
 
-        let body = resp.split_once("\r\n\r\n").map(|(_, b)| b.to_string()).unwrap_or(resp);
+        let body = resp
+            .split_once("\r\n\r\n")
+            .map(|(_, b)| b.to_string())
+            .unwrap_or(resp);
         Ok((status_code, body))
     }
 
@@ -237,7 +238,9 @@ mod tests {
         let listen = format!("127.0.0.1:{}", addr.port());
         let metrics = Arc::new(Metrics::new());
         metrics.inc_events_received(EventSource::Relay);
-        metrics.events_replicated.fetch_add(42, std::sync::atomic::Ordering::Relaxed);
+        metrics
+            .events_replicated
+            .fetch_add(42, std::sync::atomic::Ordering::Relaxed);
 
         let node_info = NodeInfo {
             version: "test".to_string(),
@@ -303,7 +306,10 @@ mod tests {
 
         let (status, body) = http_get(&listen, "/health").await?;
         assert_eq!(status, 200, "expected 200 with peers>0, got: {status}");
-        assert!(body.contains(r#""status":"ok""#), "expected status ok in: {body}");
+        assert!(
+            body.contains(r#""status":"ok""#),
+            "expected status ok in: {body}"
+        );
         assert!(body.contains(r#""peers":2"#), "expected peers=2 in: {body}");
 
         cancel.cancel();

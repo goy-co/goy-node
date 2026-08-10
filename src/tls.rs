@@ -16,7 +16,9 @@ use std::sync::{Arc, Mutex};
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName, UnixTime};
 use rustls::server::danger::{ClientCertVerified, ClientCertVerifier};
-use rustls::{ClientConfig, DigitallySignedStruct, DistinguishedName, ServerConfig, SignatureScheme};
+use rustls::{
+    ClientConfig, DigitallySignedStruct, DistinguishedName, ServerConfig, SignatureScheme,
+};
 use sha2::{Digest, Sha256};
 use tracing::{info, warn};
 
@@ -102,7 +104,10 @@ pub fn load_or_generate_cert(data_dir: &Path, node_id: &str) -> anyhow::Result<N
     write_atomic(&key_path, key_pem.as_bytes())?;
     restrict_permissions(&key_path);
 
-    info!("🔐 Generated new self-signed node certificate at {}", dir.display());
+    info!(
+        "🔐 Generated new self-signed node certificate at {}",
+        dir.display()
+    );
     Ok(cert)
 }
 
@@ -211,7 +216,10 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
 fn restrict_permissions(path: &Path) {
     use std::os::unix::fs::PermissionsExt;
     if let Err(e) = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)) {
-        warn!("⚠️  Failed to restrict permissions on {}: {e}", path.display());
+        warn!(
+            "⚠️  Failed to restrict permissions on {}: {e}",
+            path.display()
+        );
     }
 }
 
@@ -250,21 +258,28 @@ impl FingerprintStore {
         let path = data_dir.map(|d| d.join("known_fingerprints.json"));
         let mut known: HashMap<String, String> = HashMap::new();
 
-        if let Some(ref p) = path {
-            if p.exists() {
-                match std::fs::read(p).map_err(anyhow::Error::from).and_then(|b| {
-                    serde_json::from_slice::<HashMap<String, String>>(&b).map_err(Into::into)
-                }) {
-                    Ok(map) => {
-                        info!("🔐 Loaded {} known peer fingerprints from {}", map.len(), p.display());
-                        known = map
-                            .into_iter()
-                            .map(|(k, v)| (k, normalize_fingerprint(&v)))
-                            .collect();
-                    }
-                    Err(e) => {
-                        warn!("⚠️  Failed to load {}: {e}. Starting with empty TOFU store.", p.display());
-                    }
+        if let Some(ref p) = path
+            && p.exists()
+        {
+            match std::fs::read(p).map_err(anyhow::Error::from).and_then(|b| {
+                serde_json::from_slice::<HashMap<String, String>>(&b).map_err(Into::into)
+            }) {
+                Ok(map) => {
+                    info!(
+                        "🔐 Loaded {} known peer fingerprints from {}",
+                        map.len(),
+                        p.display()
+                    );
+                    known = map
+                        .into_iter()
+                        .map(|(k, v)| (k, normalize_fingerprint(&v)))
+                        .collect();
+                }
+                Err(e) => {
+                    warn!(
+                        "⚠️  Failed to load {}: {e}. Starting with empty TOFU store.",
+                        p.display()
+                    );
                 }
             }
         }
@@ -275,7 +290,10 @@ impl FingerprintStore {
             .collect();
 
         if !pinned.is_empty() {
-            info!("🔐 {} pre-approved peer fingerprints configured", pinned.len());
+            info!(
+                "🔐 {} pre-approved peer fingerprints configured",
+                pinned.len()
+            );
         }
 
         Self {
@@ -329,16 +347,19 @@ impl FingerprintStore {
         let Some(ref path) = self.path else { return };
         let Ok(known) = self.known.lock() else { return };
 
-        if let Some(parent) = path.parent() {
-            if let Err(e) = std::fs::create_dir_all(parent) {
-                warn!("⚠️  Failed to create {}: {e}", parent.display());
-                return;
-            }
+        if let Some(parent) = path.parent()
+            && let Err(e) = std::fs::create_dir_all(parent)
+        {
+            warn!("⚠️  Failed to create {}: {e}", parent.display());
+            return;
         }
-        if let Ok(bytes) = serde_json::to_vec_pretty(&*known) {
-            if let Err(e) = write_atomic(path, &bytes) {
-                warn!("⚠️  Failed to persist known fingerprints to {}: {e}", path.display());
-            }
+        if let Ok(bytes) = serde_json::to_vec_pretty(&*known)
+            && let Err(e) = write_atomic(path, &bytes)
+        {
+            warn!(
+                "⚠️  Failed to persist known fingerprints to {}: {e}",
+                path.display()
+            );
         }
     }
 }
@@ -503,6 +524,7 @@ pub fn server_config(cert: &NodeCertificate) -> anyhow::Result<Arc<ServerConfig>
 ///
 /// Devolve também o slot onde o fingerprint observado do servidor é registado
 /// durante o handshake (para aplicar TOFU depois).
+#[allow(clippy::type_complexity)]
 pub fn client_config(
     cert: &NodeCertificate,
     peer_id: &str,
@@ -590,7 +612,10 @@ mod tests {
             store.verify_or_learn("peer-1", "aa11"),
             TrustDecision::LearnedOnFirstUse
         );
-        assert_eq!(store.verify_or_learn("peer-1", "aa11"), TrustDecision::Match);
+        assert_eq!(
+            store.verify_or_learn("peer-1", "aa11"),
+            TrustDecision::Match
+        );
         assert_eq!(
             store.verify_or_learn("peer-1", "bb22"),
             TrustDecision::Mismatch {
@@ -612,7 +637,10 @@ mod tests {
 
         let reloaded = FingerprintStore::load(Some(dir.path()), &HashMap::new());
         assert_eq!(reloaded.expected("peer-x").as_deref(), Some("deadbeef"));
-        assert_eq!(reloaded.verify_or_learn("peer-x", "deadbeef"), TrustDecision::Match);
+        assert_eq!(
+            reloaded.verify_or_learn("peer-x", "deadbeef"),
+            TrustDecision::Match
+        );
         Ok(())
     }
 
@@ -624,7 +652,10 @@ mod tests {
 
         let store = FingerprintStore::load(Some(dir.path()), &pinned);
         assert_eq!(store.expected("peer-pin").as_deref(), Some("abcd"));
-        assert_eq!(store.verify_or_learn("peer-pin", "abcd"), TrustDecision::Match);
+        assert_eq!(
+            store.verify_or_learn("peer-pin", "abcd"),
+            TrustDecision::Match
+        );
         assert!(matches!(
             store.verify_or_learn("peer-pin", "9999"),
             TrustDecision::Mismatch { .. }

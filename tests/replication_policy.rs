@@ -86,7 +86,15 @@ async fn test_five_nodes_replication_factor_three() -> anyhow::Result<()> {
 
         let c = cancel.clone();
         tokio::spawn(async move {
-            let _ = goy_node::mesh::run(cfg, "ws://127.0.0.1:57777".to_string(), None, relay_events_rx, relay_publish_tx, c).await;
+            let _ = goy_node::mesh::run(
+                cfg,
+                "ws://127.0.0.1:57777".to_string(),
+                None,
+                relay_events_rx,
+                relay_publish_tx,
+                c,
+            )
+            .await;
         });
 
         events_txs.push(relay_events_tx);
@@ -101,11 +109,11 @@ async fn test_five_nodes_replication_factor_three() -> anyhow::Result<()> {
     })?;
 
     let mut receiving_nodes = std::collections::HashSet::new();
-    for i in 1..5 {
-        if let Ok(Some(msg)) = tokio::time::timeout(Duration::from_millis(600), publish_rxs[i].recv()).await {
-            if msg.contains("evt_rf3_test_001") {
-                receiving_nodes.insert(i);
-            }
+    for (i, rx) in publish_rxs.iter_mut().enumerate().skip(1) {
+        if let Ok(Some(msg)) = tokio::time::timeout(Duration::from_millis(600), rx.recv()).await
+            && msg.contains("evt_rf3_test_001")
+        {
+            receiving_nodes.insert(i);
         }
     }
 
@@ -149,7 +157,15 @@ async fn test_replication_resilience_on_node_failure() -> anyhow::Result<()> {
     };
     let c0 = cancel_node0.clone();
     tokio::spawn(async move {
-        let _ = goy_node::mesh::run(cfg_0, "ws://127.0.0.1:57777".to_string(), None, events_rx_0, publish_tx_0, c0).await;
+        let _ = goy_node::mesh::run(
+            cfg_0,
+            "ws://127.0.0.1:57777".to_string(),
+            None,
+            events_rx_0,
+            publish_tx_0,
+            c0,
+        )
+        .await;
     });
 
     let (_events_tx_1, events_rx_1) = broadcast::channel::<RelayEvent>(16);
@@ -166,7 +182,15 @@ async fn test_replication_resilience_on_node_failure() -> anyhow::Result<()> {
     };
     let c1 = cancel.clone();
     tokio::spawn(async move {
-        let _ = goy_node::mesh::run(cfg_1, "ws://127.0.0.1:57777".to_string(), None, events_rx_1, publish_tx_1, c1).await;
+        let _ = goy_node::mesh::run(
+            cfg_1,
+            "ws://127.0.0.1:57777".to_string(),
+            None,
+            events_rx_1,
+            publish_tx_1,
+            c1,
+        )
+        .await;
     });
 
     let (_events_tx_2, events_rx_2) = broadcast::channel::<RelayEvent>(16);
@@ -183,7 +207,15 @@ async fn test_replication_resilience_on_node_failure() -> anyhow::Result<()> {
     };
     let c2 = cancel.clone();
     tokio::spawn(async move {
-        let _ = goy_node::mesh::run(cfg_2, "ws://127.0.0.1:57777".to_string(), None, events_rx_2, publish_tx_2, c2).await;
+        let _ = goy_node::mesh::run(
+            cfg_2,
+            "ws://127.0.0.1:57777".to_string(),
+            None,
+            events_rx_2,
+            publish_tx_2,
+            c2,
+        )
+        .await;
     });
 
     tokio::time::sleep(Duration::from_millis(500)).await;
@@ -193,8 +225,12 @@ async fn test_replication_resilience_on_node_failure() -> anyhow::Result<()> {
         raw: test_evt.to_string(),
     })?;
 
-    let _r1 = tokio::time::timeout(Duration::from_secs(2), publish_rx_1.recv()).await?.ok_or_else(|| anyhow::anyhow!("Node 1 did not receive"))?;
-    let _r2 = tokio::time::timeout(Duration::from_secs(2), publish_rx_2.recv()).await?.ok_or_else(|| anyhow::anyhow!("Node 2 did not receive"))?;
+    let _r1 = tokio::time::timeout(Duration::from_secs(2), publish_rx_1.recv())
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("Node 1 did not receive"))?;
+    let _r2 = tokio::time::timeout(Duration::from_secs(2), publish_rx_2.recv())
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("Node 2 did not receive"))?;
 
     cancel_node0.cancel();
     tokio::time::sleep(Duration::from_millis(200)).await;

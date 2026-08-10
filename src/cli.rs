@@ -173,7 +173,10 @@ pub async fn handle_cli(cli: &Cli, metrics_listen: Option<&str>) -> anyhow::Resu
 }
 
 fn format_status(json: &Value, http_code: u16) {
-    let status_str = json.get("status").and_then(|v| v.as_str()).unwrap_or("unknown");
+    let status_str = json
+        .get("status")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown");
     let peers = json.get("peers").and_then(|v| v.as_u64()).unwrap_or(0);
     let uptime = json.get("uptime").and_then(|v| v.as_u64()).unwrap_or(0);
 
@@ -202,23 +205,50 @@ fn format_peers(json: &Value) {
 
     for item in arr {
         let peer_id = item.get("peer_id").and_then(|v| v.as_str()).unwrap_or("-");
-        let direction = item.get("direction").and_then(|v| v.as_str()).unwrap_or("-");
+        let direction = item
+            .get("direction")
+            .and_then(|v| v.as_str())
+            .unwrap_or("-");
         let address = item.get("address").and_then(|v| v.as_str()).unwrap_or("-");
-        let sent = item.get("events_sent").and_then(|v| v.as_u64()).unwrap_or(0);
-        let recv = item.get("events_received").and_then(|v| v.as_u64()).unwrap_or(0);
+        let sent = item
+            .get("events_sent")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        let recv = item
+            .get("events_received")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
 
-        println!("{:<30} {:<10} {:<22} {:<12} {:<12}", peer_id, direction, address, sent, recv);
+        println!(
+            "{:<30} {:<10} {:<22} {:<12} {:<12}",
+            peer_id, direction, address, sent, recv
+        );
     }
 }
 
 fn format_info(json: &Value) {
     let version = json.get("version").and_then(|v| v.as_str()).unwrap_or("-");
     let node_id = json.get("node_id").and_then(|v| v.as_str()).unwrap_or("-");
-    let fp = json.get("cert_fingerprint").and_then(|v| v.as_str()).unwrap_or("none");
-    let relay_url = json.get("relay_url").and_then(|v| v.as_str()).unwrap_or("-");
-    let mesh_listen = json.get("mesh_listen").and_then(|v| v.as_str()).unwrap_or("-");
-    let rf = json.get("replication_factor").and_then(|v| v.as_u64()).unwrap_or(0);
-    let tls = json.get("tls_enabled").and_then(|v| v.as_bool()).unwrap_or(false);
+    let fp = json
+        .get("cert_fingerprint")
+        .and_then(|v| v.as_str())
+        .unwrap_or("none");
+    let relay_url = json
+        .get("relay_url")
+        .and_then(|v| v.as_str())
+        .unwrap_or("-");
+    let mesh_listen = json
+        .get("mesh_listen")
+        .and_then(|v| v.as_str())
+        .unwrap_or("-");
+    let rf = json
+        .get("replication_factor")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let tls = json
+        .get("tls_enabled")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
 
     println!("Node Version      : {version}");
     println!("Node ID           : {node_id}");

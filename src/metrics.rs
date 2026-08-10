@@ -1,6 +1,6 @@
 //! Métricas Prometheus e estado de observabilidade do Goy Node.
 //!
-//!	Um `Metrics` agrega counters e gauges atómicos e formata-os em Prometheus
+//! Um `Metrics` agrega counters e gauges atómicos e formata-os em Prometheus
 //! text format via [`Metrics::render_prometheus`]. O struct é criado uma vez no
 //! arranque e partilhado como `Arc<Metrics>`, tanto pelo `MeshState` como pelo
 //! servidor HTTP (`crate::http`).
@@ -38,6 +38,7 @@ impl EventSource {
     /// Rótulo Prometheus usado como valor da label `source` no counter
     /// `goy_events_received_total`. Mantém apenas `relay` e `peer`, conforme
     /// a especificação observável do projeto.
+    #[allow(dead_code)]
     pub const fn as_str(self) -> &'static str {
         match self {
             EventSource::Relay => "relay",
@@ -136,6 +137,7 @@ impl Metrics {
 
     /// Sincroniza o gauge `peers_connected` com o estado real do `MeshState`.
     /// Usado para inicialização e periodicamente para self-heal de desvios.
+    #[allow(dead_code)]
     pub fn set_peers_connected(&self, count: u64) {
         self.peers_connected.store(count, Ordering::Relaxed);
     }
@@ -166,16 +168,24 @@ impl Metrics {
         // goy_events_received_total{source="relay"}
         s.push_str("# HELP goy_events_received_total Total events received from relay or peers.\n");
         s.push_str("# TYPE goy_events_received_total counter\n");
-        s.push_str(&format!("goy_events_received_total{{source=\"relay\"}} {received_relay}\n"));
-        s.push_str(&format!("goy_events_received_total{{source=\"peer\"}} {received_peer}\n"));
+        s.push_str(&format!(
+            "goy_events_received_total{{source=\"relay\"}} {received_relay}\n"
+        ));
+        s.push_str(&format!(
+            "goy_events_received_total{{source=\"peer\"}} {received_peer}\n"
+        ));
 
         // goy_events_replicated_total
-        s.push_str("# HELP goy_events_replicated_total Total events replicated to peers (N-of-M).\n");
+        s.push_str(
+            "# HELP goy_events_replicated_total Total events replicated to peers (N-of-M).\n",
+        );
         s.push_str("# TYPE goy_events_replicated_total counter\n");
         s.push_str(&format!("goy_events_replicated_total {replicated}\n"));
 
         // goy_events_rate_limited_total
-        s.push_str("# HELP goy_events_rate_limited_total Events rejected by per-peer rate limiting.\n");
+        s.push_str(
+            "# HELP goy_events_rate_limited_total Events rejected by per-peer rate limiting.\n",
+        );
         s.push_str("# TYPE goy_events_rate_limited_total counter\n");
         s.push_str(&format!("goy_events_rate_limited_total {rate_limited}\n"));
 
@@ -195,7 +205,9 @@ impl Metrics {
         s.push_str(&format!("goy_peers_connected {peers}\n"));
 
         // goy_backfill_requests_total
-        s.push_str("# HELP goy_backfill_requests_total Backfill REQ messages received from peers.\n");
+        s.push_str(
+            "# HELP goy_backfill_requests_total Backfill REQ messages received from peers.\n",
+        );
         s.push_str("# TYPE goy_backfill_requests_total counter\n");
         s.push_str(&format!("goy_backfill_requests_total {backfill}\n"));
 
@@ -212,7 +224,9 @@ impl Metrics {
 
         // goy_hash_ring_vnodes
         let ring_vnodes = self.hash_ring_vnodes.load(Ordering::Relaxed);
-        s.push_str("# HELP goy_hash_ring_vnodes Total virtual nodes active in the consistent hash ring.\n");
+        s.push_str(
+            "# HELP goy_hash_ring_vnodes Total virtual nodes active in the consistent hash ring.\n",
+        );
         s.push_str("# TYPE goy_hash_ring_vnodes gauge\n");
         s.push_str(&format!("goy_hash_ring_vnodes {ring_vnodes}\n"));
 
@@ -314,7 +328,10 @@ mod tests {
             let Some((_, value)) = line.rsplit_once(' ') else {
                 panic!("malformed Prometheus line (no value separator): {line:?}");
             };
-            assert!(value.parse::<u64>().is_ok(), "value must be a non-negative integer: {value:?} in line {line:?}");
+            assert!(
+                value.parse::<u64>().is_ok(),
+                "value must be a non-negative integer: {value:?} in line {line:?}"
+            );
         }
     }
 }

@@ -4,8 +4,8 @@
 //! A busca por réplicas responsáveis percorre o anel no sentido dos ponteiros do relógio (clockwise),
 //! selecionando N peers físicos distintos.
 
-use std::collections::BTreeMap;
 use sha2::{Digest, Sha256};
+use std::collections::BTreeMap;
 
 /// Anel de consistent hashing determinístico.
 #[derive(Debug, Clone)]
@@ -18,6 +18,7 @@ pub struct ConsistentHashRing {
     peers: Vec<String>,
 }
 
+#[allow(dead_code)]
 impl ConsistentHashRing {
     /// Cria um novo anel de consistent hashing.
     pub fn new(vnodes_per_peer: usize) -> Self {
@@ -190,7 +191,9 @@ mod tests {
         let expected_per_peer = total_keys / peers.len();
 
         for (peer, count) in &counts {
-            let deviation = ((*count as f64 - expected_per_peer as f64).abs() / expected_per_peer as f64) * 100.0;
+            let deviation = ((*count as f64 - expected_per_peer as f64).abs()
+                / expected_per_peer as f64)
+                * 100.0;
             assert!(
                 deviation < 15.0,
                 "Peer {peer} count {count} deviates by {deviation:.2}% (expected ~{expected_per_peer})"

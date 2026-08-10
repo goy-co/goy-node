@@ -6,15 +6,15 @@
 
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use backoff::ExponentialBackoffBuilder;
 use dashmap::{DashMap, DashSet};
 use futures_util::{Sink, SinkExt, Stream, StreamExt};
 use tokio::net::TcpListener;
-use tokio::sync::{broadcast, mpsc, Mutex};
+use tokio::sync::{Mutex, broadcast, mpsc};
 use tokio_tungstenite::tungstenite::Message;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
@@ -48,11 +48,7 @@ impl std::fmt::Debug for TlsContext {
 
 impl TlsContext {
     /// Constrói o contexto TLS a partir da config e do `node_id`.
-    pub fn new(
-        cfg: &MeshConfig,
-        node_id: &str,
-        data_dir: Option<&Path>,
-    ) -> anyhow::Result<Self> {
+    pub fn new(cfg: &MeshConfig, node_id: &str, data_dir: Option<&Path>) -> anyhow::Result<Self> {
         let cert = match data_dir {
             Some(dir) => crate::tls::load_or_generate_cert(dir, node_id)?,
             None => crate::tls::generate_self_signed(node_id)?,
@@ -181,7 +177,7 @@ pub fn select_replication_peers(
 
     let filtered: Vec<String> = responsible
         .into_iter()
-        .filter(|p| source_peer.map_or(true, |src| src != p))
+        .filter(|p| source_peer.is_none_or(|src| src != p))
         .collect();
 
     // Deduplica conexões para preferir outbound (ws:// ou wss://) sobre conexões inbound temporárias
@@ -222,13 +218,16 @@ pub fn replicate_event(
 
     let msg = Message::Text(event_raw.into());
     for target in targets {
-        if let Some(tx) = state.peer_channels.get(&target) {
-            if tx.value().try_send(msg.clone()).is_ok() {
-                state.events_replicated.fetch_add(1, Ordering::Relaxed);
-                state.metrics.events_replicated.fetch_add(1, Ordering::Relaxed);
-                if let Some(session) = state.active_peer_sessions.get(&target) {
-                    session.events_sent.fetch_add(1, Ordering::Relaxed);
-                }
+        if let Some(tx) = state.peer_channels.get(&target)
+            && tx.value().try_send(msg.clone()).is_ok()
+        {
+            state.events_replicated.fetch_add(1, Ordering::Relaxed);
+            state
+                .metrics
+                .events_replicated
+                .fetch_add(1, Ordering::Relaxed);
+            if let Some(session) = state.active_peer_sessions.get(&target) {
+                session.events_sent.fetch_add(1, Ordering::Relaxed);
             }
         }
     }
@@ -242,7 +241,11 @@ pub fn process_replaceable_event(state: &MeshState, raw_event: &str) -> bool {
         return true; // Não é um objeto evento, permite parse normal
     };
 
-    let event_id = event_obj.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let event_id = event_obj
+        .get("id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
 
     // Verificar se o evento foi deletado (NIP-09)
     if state.deleted_ids.contains(&event_id) {
@@ -254,22 +257,29 @@ pub fn process_replaceable_event(state: &MeshState, raw_event: &str) -> bool {
         return true; // Não é evento substituível
     };
 
-    let created_at = event_obj.get("created_at").and_then(|v| v.as_u64()).unwrap_or(0);
+    let created_at = event_obj
+        .get("created_at")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
 
     if let Some(entry) = state.latest_replaceable.get(&key) {
         let (stored_created_at, stored_id) = entry.value();
         if created_at < *stored_created_at {
-            tracing::debug!("♻️ Discarding stale replaceable event {key} (created_at {created_at} < {stored_created_at})");
+            tracing::debug!(
+                "♻️ Discarding stale replaceable event {key} (created_at {created_at} < {stored_created_at})"
+            );
             return false;
-        } else if created_at == *stored_created_at {
-            if event_id >= *stored_id {
-                tracing::debug!("♻️ Discarding tie-break lost replaceable event {key} (id {event_id} >= {stored_id})");
-                return false;
-            }
+        } else if created_at == *stored_created_at && event_id >= *stored_id {
+            tracing::debug!(
+                "♻️ Discarding tie-break lost replaceable event {key} (id {event_id} >= {stored_id})"
+            );
+            return false;
         }
     }
 
-    state.latest_replaceable.insert(key.clone(), (created_at, event_id.clone()));
+    state
+        .latest_replaceable
+        .insert(key.clone(), (created_at, event_id.clone()));
     info!("♻️ Updated latest replaceable event {key} (created_at={created_at}, id={event_id})");
     true
 }
@@ -278,6 +288,7 @@ pub fn process_replaceable_event(state: &MeshState, raw_event: &str) -> bool {
 /// - Verifica autoridade: apenas o autor pode deletar os seus próprios eventos.
 /// - Por tags `e`: marca os event IDs como deletados em `state.deleted_ids`.
 /// - Por tags `a`: remove a entrada correspondente de `state.latest_replaceable`.
+///
 /// Retorna `true` se o evento de deleção foi processado com sucesso (deve ser replicado),
 /// `false` se for inválido (sem pubkey) — mas sempre replica kind 5 válidos para que os outros
 /// nós também apliquem a deleção.
@@ -313,7 +324,9 @@ pub fn process_deletion_event(state: &MeshState, raw_event: &str) -> bool {
         // Formato: "pubkey:kind" ou "pubkey:kind:d_tag"
         let coord_pubkey = coord_key.split(':').next().unwrap_or("");
         if coord_pubkey != del_pubkey {
-            tracing::debug!("🗑️ Deletion of `a` tag {coord_key} rejected: pubkey mismatch ({del_pubkey} != {coord_pubkey})");
+            tracing::debug!(
+                "🗑️ Deletion of `a` tag {coord_key} rejected: pubkey mismatch ({del_pubkey} != {coord_pubkey})"
+            );
             continue;
         }
         if state.latest_replaceable.remove(coord_key).is_some() {
@@ -345,7 +358,11 @@ pub fn process_expiry_check(state: &MeshState, raw_event: &str) -> bool {
     }
 
     // Evento com expiração futura — registar para limpeza periódica
-    let event_id = event_obj.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let event_id = event_obj
+        .get("id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
     if !event_id.is_empty() {
         state.expiring_events.insert(event_id, exp_ts);
     }
@@ -409,17 +426,27 @@ fn load_state(data_dir: Option<&Path>) -> (DashSet<String>, DashSet<String>, Das
         match std::fs::read(&seen_file) {
             Ok(bytes) => match serde_json::from_slice::<Vec<String>>(&bytes) {
                 Ok(ids) => {
-                    info!("💾 Loaded {} seen event IDs from {}", ids.len(), seen_file.display());
+                    info!(
+                        "💾 Loaded {} seen event IDs from {}",
+                        ids.len(),
+                        seen_file.display()
+                    );
                     for id in ids {
                         seen_ids.insert(id);
                     }
                 }
                 Err(e) => {
-                    warn!("⚠️  Failed to parse {}: {e}. Starting fresh with empty seen_ids.", seen_file.display());
+                    warn!(
+                        "⚠️  Failed to parse {}: {e}. Starting fresh with empty seen_ids.",
+                        seen_file.display()
+                    );
                 }
             },
             Err(e) => {
-                warn!("⚠️  Failed to read {}: {e}. Starting fresh with empty seen_ids.", seen_file.display());
+                warn!(
+                    "⚠️  Failed to read {}: {e}. Starting fresh with empty seen_ids.",
+                    seen_file.display()
+                );
             }
         }
     }
@@ -430,17 +457,27 @@ fn load_state(data_dir: Option<&Path>) -> (DashSet<String>, DashSet<String>, Das
         match std::fs::read(&deleted_file) {
             Ok(bytes) => match serde_json::from_slice::<Vec<String>>(&bytes) {
                 Ok(ids) => {
-                    info!("🗑️  Loaded {} deleted event IDs from {}", ids.len(), deleted_file.display());
+                    info!(
+                        "🗑️  Loaded {} deleted event IDs from {}",
+                        ids.len(),
+                        deleted_file.display()
+                    );
                     for id in ids {
                         deleted_ids.insert(id);
                     }
                 }
                 Err(e) => {
-                    warn!("⚠️  Failed to parse {}: {e}. Starting fresh with empty deleted_ids.", deleted_file.display());
+                    warn!(
+                        "⚠️  Failed to parse {}: {e}. Starting fresh with empty deleted_ids.",
+                        deleted_file.display()
+                    );
                 }
             },
             Err(e) => {
-                warn!("⚠️  Failed to read {}: {e}. Starting fresh with empty deleted_ids.", deleted_file.display());
+                warn!(
+                    "⚠️  Failed to read {}: {e}. Starting fresh with empty deleted_ids.",
+                    deleted_file.display()
+                );
             }
         }
     }
@@ -449,19 +486,31 @@ fn load_state(data_dir: Option<&Path>) -> (DashSet<String>, DashSet<String>, Das
     let cursors_file = dir.join("peer_cursors.json");
     if cursors_file.exists() {
         match std::fs::read(&cursors_file) {
-            Ok(bytes) => match serde_json::from_slice::<std::collections::HashMap<String, u64>>(&bytes) {
-                Ok(map) => {
-                    info!("💾 Loaded {} peer cursors from {}", map.len(), cursors_file.display());
-                    for (peer, cursor) in map {
-                        peer_cursors.insert(peer, cursor);
+            Ok(bytes) => {
+                match serde_json::from_slice::<std::collections::HashMap<String, u64>>(&bytes) {
+                    Ok(map) => {
+                        info!(
+                            "💾 Loaded {} peer cursors from {}",
+                            map.len(),
+                            cursors_file.display()
+                        );
+                        for (peer, cursor) in map {
+                            peer_cursors.insert(peer, cursor);
+                        }
+                    }
+                    Err(e) => {
+                        warn!(
+                            "⚠️  Failed to parse {}: {e}. Starting fresh with empty peer_cursors.",
+                            cursors_file.display()
+                        );
                     }
                 }
-                Err(e) => {
-                    warn!("⚠️  Failed to parse {}: {e}. Starting fresh with empty peer_cursors.", cursors_file.display());
-                }
-            },
+            }
             Err(e) => {
-                warn!("⚠️  Failed to read {}: {e}. Starting fresh with empty peer_cursors.", cursors_file.display());
+                warn!(
+                    "⚠️  Failed to read {}: {e}. Starting fresh with empty peer_cursors.",
+                    cursors_file.display()
+                );
             }
         }
     }
@@ -515,8 +564,12 @@ fn save_state(state: &MeshState) {
         }
     }
 
-    info!("💾 State saved to disk ({} seen_ids, {} deleted_ids, {} cursors)",
-        seen_vec.len(), deleted_vec.len(), cursors_map.len());
+    info!(
+        "💾 State saved to disk ({} seen_ids, {} deleted_ids, {} cursors)",
+        seen_vec.len(),
+        deleted_vec.len(),
+        cursors_map.len()
+    );
 }
 
 /// Guard RAII para remover o peer de `connected_peers` quando a sessão termina.
@@ -535,8 +588,14 @@ impl Drop for PeerGuard {
 
         if let Ok(mut ring) = self.state.hash_ring.write() {
             ring.remove_peer(&self.peer_id);
-            self.state.metrics.hash_ring_peers.store(ring.peer_count() as u64, Ordering::Relaxed);
-            self.state.metrics.hash_ring_vnodes.store(ring.vnode_count() as u64, Ordering::Relaxed);
+            self.state
+                .metrics
+                .hash_ring_peers
+                .store(ring.peer_count() as u64, Ordering::Relaxed);
+            self.state
+                .metrics
+                .hash_ring_vnodes
+                .store(ring.vnode_count() as u64, Ordering::Relaxed);
         }
     }
 }
@@ -552,12 +611,12 @@ fn load_or_generate_node_id(cfg_node_id: Option<&str>, data_dir: Option<&Path>) 
 
     if let Some(dir) = data_dir {
         let path = dir.join("node_id.txt");
-        if path.exists() {
-            if let Ok(id) = std::fs::read_to_string(&path) {
-                let trimmed = id.trim().to_string();
-                if !trimmed.is_empty() {
-                    return trimmed;
-                }
+        if path.exists()
+            && let Ok(id) = std::fs::read_to_string(&path)
+        {
+            let trimmed = id.trim().to_string();
+            if !trimmed.is_empty() {
+                return trimmed;
             }
         }
         let new_id = uuid::Uuid::new_v4().to_string();
@@ -574,6 +633,7 @@ fn load_or_generate_node_id(cfg_node_id: Option<&str>, data_dir: Option<&Path>) 
 }
 
 /// Inicia o mesh agent: listener para peers + seeds outbound + consumer de eventos locais.
+#[allow(dead_code)]
 pub async fn run(
     cfg: MeshConfig,
     relay_url: String,
@@ -647,7 +707,9 @@ pub async fn run_with_http_listen(
         info!("🔐 Node cert fingerprint: {}", ctx.cert.fingerprint);
         Some(ctx)
     } else {
-        warn!("🔓 TLS DISABLED (mesh.tls_enabled = false) — peer traffic is PLAINTEXT. Dev/testing only!");
+        warn!(
+            "🔓 TLS DISABLED (mesh.tls_enabled = false) — peer traffic is PLAINTEXT. Dev/testing only!"
+        );
         None
     };
     let cert_fingerprint = tls_ctx.as_ref().map(|c| c.cert.fingerprint.clone());
@@ -667,7 +729,9 @@ pub async fn run_with_http_listen(
         let c = cancel.clone();
         let st = state.clone();
         tokio::spawn(async move {
-            if let Err(e) = crate::http::run_http_server(listen_addr, m, node_info, Some(st), c).await {
+            if let Err(e) =
+                crate::http::run_http_server(listen_addr, m, node_info, Some(st), c).await
+            {
                 error!("❌ HTTP observability server failed: {e}");
             }
         });
@@ -678,7 +742,11 @@ pub async fn run_with_http_listen(
     info!(
         "🌐 Mesh agent listening on {} ({})",
         cfg.listen,
-        if tls_ctx.is_some() { "TLS 1.3 mutual" } else { "plaintext" }
+        if tls_ctx.is_some() {
+            "TLS 1.3 mutual"
+        } else {
+            "plaintext"
+        }
     );
 
     // ── Task: consumir eventos do relay local → replicar para peers ──
@@ -758,7 +826,9 @@ pub async fn run_with_http_listen(
 
         // Registo inicial na startup (POST /relays)
         if let Err(e) = registry_client.register(&relay_info).await {
-            warn!("⚠️ Initial registry registration failed at {registry_url}: {e}. Operating with static seeds/cache.");
+            warn!(
+                "⚠️ Initial registry registration failed at {registry_url}: {e}. Operating with static seeds/cache."
+            );
         }
 
         // Task: Heartbeat periódico no registry (PUT /relays/{node_id}) + Deregisto no shutdown (DELETE)
@@ -962,20 +1032,42 @@ fn start_seed_task(
 
                 if state.connected_peers.contains(&seed_url) {
                     tokio::time::sleep(Duration::from_secs(5)).await;
-                    return Err::<(), _>(backoff::Error::transient(anyhow::anyhow!("already connected")));
+                    return Err::<(), _>(backoff::Error::transient(anyhow::anyhow!(
+                        "already connected"
+                    )));
                 }
 
                 info!("🌱 Connecting outbound to seed: {seed_url}");
                 match connect_to_peer(&seed_url, tls_ctx.as_ref()).await {
                     Ok(PeerConnection::Tls { sink, stream }) => {
                         info!("🟢 Outbound TLS connection established to seed: {seed_url}");
-                        handle_peer_stream(seed_url.clone(), sink, stream, state, heartbeat_secs, cancel).await;
-                        Err::<(), _>(backoff::Error::transient(anyhow::anyhow!("seed connection ended")))
+                        handle_peer_stream(
+                            seed_url.clone(),
+                            sink,
+                            stream,
+                            state,
+                            heartbeat_secs,
+                            cancel,
+                        )
+                        .await;
+                        Err::<(), _>(backoff::Error::transient(anyhow::anyhow!(
+                            "seed connection ended"
+                        )))
                     }
                     Ok(PeerConnection::Plain { sink, stream }) => {
                         info!("🟢 Outbound plaintext connection established to seed: {seed_url}");
-                        handle_peer_stream(seed_url.clone(), sink, stream, state, heartbeat_secs, cancel).await;
-                        Err::<(), _>(backoff::Error::transient(anyhow::anyhow!("seed connection ended")))
+                        handle_peer_stream(
+                            seed_url.clone(),
+                            sink,
+                            stream,
+                            state,
+                            heartbeat_secs,
+                            cancel,
+                        )
+                        .await;
+                        Err::<(), _>(backoff::Error::transient(anyhow::anyhow!(
+                            "seed connection ended"
+                        )))
                     }
                     Err(e) => {
                         warn!("🔌 Seed connection to {seed_url} failed: {e}. Reconnecting…");
@@ -1093,9 +1185,10 @@ async fn connect_to_peer(
         .to_owned();
 
     let connector = tokio_rustls::TlsConnector::from(client_cfg);
-    let tls_stream = connector.connect(server_name, tcp).await.map_err(|e| {
-        anyhow::anyhow!("TLS handshake with {peer_url} failed: {e}")
-    })?;
+    let tls_stream = connector
+        .connect(server_name, tcp)
+        .await
+        .map_err(|e| anyhow::anyhow!("TLS handshake with {peer_url} failed: {e}"))?;
 
     // Handshake passou: se o peer era desconhecido, aprende o fingerprint agora.
     let received = observed
@@ -1175,7 +1268,10 @@ async fn handle_peer_stream<Si, St>(
     cancel: CancellationToken,
 ) where
     Si: Sink<Message> + Unpin + Send + 'static,
-    St: Stream<Item = Result<Message, tokio_tungstenite::tungstenite::Error>> + Unpin + Send + 'static,
+    St: Stream<Item = Result<Message, tokio_tungstenite::tungstenite::Error>>
+        + Unpin
+        + Send
+        + 'static,
 {
     if !state.connected_peers.insert(peer_id.clone()) {
         warn!("⚠️ Already connected to peer {peer_id}, skipping duplicate session");
@@ -1189,7 +1285,10 @@ async fn handle_peer_stream<Si, St>(
     state.peer_channels.insert(peer_id.clone(), ctrl_tx.clone());
 
     let (direction, address) = if peer_id.starts_with("inbound:") {
-        ("inbound".to_string(), peer_id.trim_start_matches("inbound:").to_string())
+        (
+            "inbound".to_string(),
+            peer_id.trim_start_matches("inbound:").to_string(),
+        )
     } else {
         let addr = parse_ws_host_port(&peer_id)
             .map(|(h, p)| format!("{h}:{p}"))
@@ -1206,13 +1305,21 @@ async fn handle_peer_stream<Si, St>(
         events_received: Arc::new(AtomicU64::new(0)),
         tls_fingerprint: None,
     });
-    state.active_peer_sessions.insert(peer_id.clone(), session_info);
+    state
+        .active_peer_sessions
+        .insert(peer_id.clone(), session_info);
 
     {
         let mut ring = state.hash_ring.write().unwrap();
         ring.add_peer(&peer_id);
-        state.metrics.hash_ring_peers.store(ring.peer_count() as u64, Ordering::Relaxed);
-        state.metrics.hash_ring_vnodes.store(ring.vnode_count() as u64, Ordering::Relaxed);
+        state
+            .metrics
+            .hash_ring_peers
+            .store(ring.peer_count() as u64, Ordering::Relaxed);
+        state
+            .metrics
+            .hash_ring_vnodes
+            .store(ring.vnode_count() as u64, Ordering::Relaxed);
     }
 
     let state_rebal = state.clone();
@@ -1262,8 +1369,11 @@ async fn handle_peer_stream<Si, St>(
         .map(|c| *c.value())
         .unwrap_or(0);
     info!("🔄 Sending initial backfill REQ to peer {peer_id} with cursor={cursor}");
-    let backfill_req = format!(r#"["REQ","goy-backfill",{{"since":{},"limit":500}}]"#, cursor);
-    let _ = ctrl_tx.send(Message::Text(backfill_req.into())).await;
+    let backfill_req = format!(
+        r#"["REQ","goy-backfill",{{"since":{},"limit":500}}]"#,
+        cursor
+    );
+    let _ = ctrl_tx.send(Message::Text(backfill_req)).await;
 
     // ── Receber mensagens do peer (REQ, EVENT, EOSE, NOTICE, Ping, Pong) + timeout de inatividade ──
     let timeout_secs = heartbeat_secs * 3;
@@ -1368,7 +1478,7 @@ async fn handle_peer_stream<Si, St>(
                                         // Resposta OK otimista apenas para eventos em tempo real (2 elementos)
                                         if is_live_publish_event(&text) {
                                             let ok_msg = format!(r#"["OK","{}",true,""]"#, id);
-                                            let _ = ctrl_tx.send(Message::Text(ok_msg.into())).await;
+                                            let _ = ctrl_tx.send(Message::Text(ok_msg)).await;
                                         }
                                     } else {
                                         tracing::debug!("🔁 Event {id} from peer {peer_id} already seen (dedup), skipping relay publish");
@@ -1456,7 +1566,10 @@ async fn rebalance_to_new_peer(
     });
 
     let rebalanced_count = target_ids.len() as u64;
-    state.metrics.rebalance_events_sent.fetch_add(rebalanced_count, Ordering::Relaxed);
+    state
+        .metrics
+        .rebalance_events_sent
+        .fetch_add(rebalanced_count, Ordering::Relaxed);
     info!("🔄 Rebalancing: sent {rebalanced_count} events to new peer {new_peer_id}");
 
     handle_backfill_req(
@@ -1487,7 +1600,7 @@ async fn handle_backfill_req(
         Err(e) => {
             warn!("🔌 Failed to connect to local relay at {relay_url} for backfill: {e}");
             let eose_msg = format!(r#"["EOSE","{}"]"#, sub_id);
-            let _ = ctrl_tx.send(Message::Text(eose_msg.into())).await;
+            let _ = ctrl_tx.send(Message::Text(eose_msg)).await;
             return;
         }
     };
@@ -1503,10 +1616,10 @@ async fn handle_backfill_req(
         None => format!(r#"["REQ","{}",{{"since":0,"limit":{}}}]"#, sub_id, limit),
     };
 
-    if let Err(e) = ws.send(Message::Text(req_payload.into())).await {
+    if let Err(e) = ws.send(Message::Text(req_payload)).await {
         warn!("🔌 Failed to send REQ to local relay at {relay_url}: {e}");
         let eose_msg = format!(r#"["EOSE","{}"]"#, sub_id);
-        let _ = ctrl_tx.send(Message::Text(eose_msg.into())).await;
+        let _ = ctrl_tx.send(Message::Text(eose_msg)).await;
         return;
     }
 
@@ -1518,20 +1631,20 @@ async fn handle_backfill_req(
             Ok(Message::Text(text)) => {
                 if text.starts_with(r#"["EVENT""#) {
                     if sent_count < limit {
-                        if ctrl_tx.send(Message::Text(text.into())).await.is_err() {
+                        if ctrl_tx.send(Message::Text(text)).await.is_err() {
                             break;
                         }
                         sent_count += 1;
                     }
                     if sent_count >= limit {
                         let eose_msg = format!(r#"["EOSE","{}"]"#, sub_id);
-                        let _ = ctrl_tx.send(Message::Text(eose_msg.into())).await;
+                        let _ = ctrl_tx.send(Message::Text(eose_msg)).await;
                         eose_sent = true;
                         break;
                     }
                 } else if text.starts_with(r#"["EOSE""#) {
                     let eose_msg = format!(r#"["EOSE","{}"]"#, sub_id);
-                    let _ = ctrl_tx.send(Message::Text(eose_msg.into())).await;
+                    let _ = ctrl_tx.send(Message::Text(eose_msg)).await;
                     eose_sent = true;
                     break;
                 }
@@ -1549,7 +1662,7 @@ async fn handle_backfill_req(
 
     if !eose_sent {
         let eose_msg = format!(r#"["EOSE","{}"]"#, sub_id);
-        let _ = ctrl_tx.send(Message::Text(eose_msg.into())).await;
+        let _ = ctrl_tx.send(Message::Text(eose_msg)).await;
     }
 
     info!("📦 backfill: enviados {sent_count}/{limit} eventos para peer {peer_id}");
@@ -1559,12 +1672,12 @@ async fn handle_backfill_req(
 /// Se for um evento de resposta a REQ (3 elementos: ["EVENT", sub_id, event_obj]),
 /// converte para formato de publicação (2 elementos: ["EVENT", event_obj]).
 fn normalize_event_for_publish(raw: &str) -> String {
-    if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(raw) {
-        if let Some(arr) = parsed.as_array() {
-            if arr.len() >= 3 && arr[0].as_str() == Some("EVENT") {
-                return format!(r#"["EVENT",{}]"#, arr[2]);
-            }
-        }
+    if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(raw)
+        && let Some(arr) = parsed.as_array()
+        && arr.len() >= 3
+        && arr[0].as_str() == Some("EVENT")
+    {
+        return format!(r#"["EVENT",{}]"#, arr[2]);
     }
     raw.to_string()
 }
@@ -1595,10 +1708,10 @@ fn parse_eose_sub_id(raw: &str) -> Option<String> {
 
 /// Retorna verdadeiro se for um evento de publicação em tempo real (2 elementos: ["EVENT", event_obj]).
 fn is_live_publish_event(raw: &str) -> bool {
-    if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(raw) {
-        if let Some(arr) = parsed.as_array() {
-            return arr.len() == 2 && arr[0].as_str() == Some("EVENT");
-        }
+    if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(raw)
+        && let Some(arr) = parsed.as_array()
+    {
+        return arr.len() == 2 && arr[0].as_str() == Some("EVENT");
     }
     false
 }
@@ -1695,7 +1808,15 @@ mod tests {
 
         let cancel_mesh = cancel.clone();
         tokio::spawn(async move {
-            let _ = run(cfg, "ws://127.0.0.1:57777".to_string(), None, relay_events_rx, relay_publish_tx, cancel_mesh).await;
+            let _ = run(
+                cfg,
+                "ws://127.0.0.1:57777".to_string(),
+                None,
+                relay_events_rx,
+                relay_publish_tx,
+                cancel_mesh,
+            )
+            .await;
         });
 
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -1709,10 +1830,14 @@ mod tests {
         let init_req = tokio::time::timeout(Duration::from_secs(2), ws_stream.next())
             .await?
             .ok_or_else(|| anyhow::anyhow!("ws_stream closed unexpectedly"))??;
-        assert_eq!(init_req.to_text()?, r#"["REQ","goy-backfill",{"since":0,"limit":500}]"#);
+        assert_eq!(
+            init_req.to_text()?,
+            r#"["REQ","goy-backfill",{"since":0,"limit":500}]"#
+        );
 
         // 1. Fluxo: Relay local -> Mesh Agent -> Peer
-        let event_from_relay = r#"["EVENT","goy-live",{"id":"relay_evt_1","content":"hello from strfry"}]"#;
+        let event_from_relay =
+            r#"["EVENT","goy-live",{"id":"relay_evt_1","content":"hello from strfry"}]"#;
         relay_events_tx.send(RelayEvent {
             raw: event_from_relay.to_string(),
         })?;
@@ -1777,7 +1902,15 @@ mod tests {
 
         let cancel_a = cancel.clone();
         tokio::spawn(async move {
-            let _ = run(cfg_a, "ws://127.0.0.1:57777".to_string(), None, relay_events_rx_a, relay_publish_tx_a, cancel_a).await;
+            let _ = run(
+                cfg_a,
+                "ws://127.0.0.1:57777".to_string(),
+                None,
+                relay_events_rx_a,
+                relay_publish_tx_a,
+                cancel_a,
+            )
+            .await;
         });
 
         // ── Node B (com seed = ws://127.0.0.1:18446, escuta em 18447) ───────
@@ -1804,7 +1937,15 @@ mod tests {
 
         let cancel_b = cancel.clone();
         tokio::spawn(async move {
-            let _ = run(cfg_b, "ws://127.0.0.1:57777".to_string(), None, relay_events_rx_b, relay_publish_tx_b, cancel_b).await;
+            let _ = run(
+                cfg_b,
+                "ws://127.0.0.1:57777".to_string(),
+                None,
+                relay_events_rx_b,
+                relay_publish_tx_b,
+                cancel_b,
+            )
+            .await;
         });
 
         // Aguarda estabelecimento da conexão outbound do Node B -> Node A
@@ -1861,21 +2002,18 @@ mod tests {
                 tokio::select! {
                     _ = cancel_mock.cancelled() => break,
                     res = mock_listener.accept() => {
-                        if let Ok((stream, _)) = res {
-                            if let Ok(mut ws) = accept_async(stream).await {
+                        if let Ok((stream, _)) = res
+                            && let Ok(mut ws) = accept_async(stream).await {
                                 while let Some(Ok(msg)) = ws.next().await {
-                                    if let Message::Text(text) = msg {
-                                        if text.starts_with(r#"["REQ""#) {
-                                            // Ao receber REQ, responde com um evento histórico + EOSE
+                                    if let Message::Text(text) = msg
+                                        && text.starts_with(r#"["REQ""#) {
                                             let hist_evt = r#"["EVENT","goy-backfill",{"id":"hist_123","content":"historical data"}]"#;
                                             let eose = r#"["EOSE","goy-backfill"]"#;
                                             let _ = ws.send(Message::Text(hist_evt.into())).await;
                                             let _ = ws.send(Message::Text(eose.into())).await;
                                             break;
-                                        }
                                     }
                                 }
-                            }
                         }
                     }
                 }
@@ -1908,7 +2046,15 @@ mod tests {
 
         let cancel_a = cancel.clone();
         tokio::spawn(async move {
-            let _ = run(cfg_a, mock_url, None, relay_events_rx_a, relay_publish_tx_a, cancel_a).await;
+            let _ = run(
+                cfg_a,
+                mock_url,
+                None,
+                relay_events_rx_a,
+                relay_publish_tx_a,
+                cancel_a,
+            )
+            .await;
         });
 
         // ── 3. Node B (seed = Node A, escuta em 18451) ──
@@ -1935,7 +2081,15 @@ mod tests {
 
         let cancel_b = cancel.clone();
         tokio::spawn(async move {
-            let _ = run(cfg_b, "ws://127.0.0.1:57777".to_string(), None, relay_events_rx_b, relay_publish_tx_b, cancel_b).await;
+            let _ = run(
+                cfg_b,
+                "ws://127.0.0.1:57777".to_string(),
+                None,
+                relay_events_rx_b,
+                relay_publish_tx_b,
+                cancel_b,
+            )
+            .await;
         });
 
         // Aguarda Node B conectar a Node A e solicitar backfill
@@ -2002,7 +2156,15 @@ mod tests {
 
         let cancel_a = cancel.clone();
         tokio::spawn(async move {
-            let _ = run(cfg_a, "ws://127.0.0.1:57777".to_string(), None, relay_events_rx_a, relay_publish_tx_a, cancel_a).await;
+            let _ = run(
+                cfg_a,
+                "ws://127.0.0.1:57777".to_string(),
+                None,
+                relay_events_rx_a,
+                relay_publish_tx_a,
+                cancel_a,
+            )
+            .await;
         });
 
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -2014,7 +2176,10 @@ mod tests {
         let init_req = tokio::time::timeout(Duration::from_secs(2), ws_stream.next())
             .await?
             .ok_or_else(|| anyhow::anyhow!("ws closed"))??;
-        assert_eq!(init_req.to_text()?, r#"["REQ","goy-backfill",{"since":0,"limit":500}]"#);
+        assert_eq!(
+            init_req.to_text()?,
+            r#"["REQ","goy-backfill",{"since":0,"limit":500}]"#
+        );
 
         // 2. Recebe heartbeat periodicamente de Node A (após 1s)
         let heartbeat_msg = tokio::time::timeout(Duration::from_secs(2), ws_stream.next())
@@ -2031,7 +2196,8 @@ mod tests {
                 }
             }
             Ok(())
-        }).await;
+        })
+        .await;
 
         cancel.cancel();
         Ok(())
@@ -2048,7 +2214,9 @@ mod tests {
         state.seen_ids.insert("evt_persisted_1".to_string());
         state.seen_ids.insert("evt_persisted_2".to_string());
         state.deleted_ids.insert("evt_deleted_1".to_string());
-        state.peer_cursors.insert("ws://127.0.0.1:19999".to_string(), 1786290000);
+        state
+            .peer_cursors
+            .insert("ws://127.0.0.1:19999".to_string(), 1786290000);
 
         save_state(&state);
 
@@ -2056,13 +2224,24 @@ mod tests {
         let (loaded_seen, loaded_deleted, loaded_cursors) = load_state(Some(&data_dir));
         assert!(loaded_seen.contains("evt_persisted_1"));
         assert!(loaded_seen.contains("evt_persisted_2"));
-        assert!(loaded_deleted.contains("evt_deleted_1"), "deleted_ids must persist");
-        assert_eq!(loaded_cursors.get("ws://127.0.0.1:19999").map(|c| *c.value()), Some(1786290000));
+        assert!(
+            loaded_deleted.contains("evt_deleted_1"),
+            "deleted_ids must persist"
+        );
+        assert_eq!(
+            loaded_cursors
+                .get("ws://127.0.0.1:19999")
+                .map(|c| *c.value()),
+            Some(1786290000)
+        );
 
         // Simula corrupção de ficheiro
         std::fs::write(data_dir.join("seen_ids.json"), b"corrupted data {{{")?;
         let (corrupt_seen, _, _corrupt_cursors) = load_state(Some(&data_dir));
-        assert!(corrupt_seen.is_empty(), "Corrupt file should fallback to empty set without panic");
+        assert!(
+            corrupt_seen.is_empty(),
+            "Corrupt file should fallback to empty set without panic"
+        );
 
         Ok(())
     }
@@ -2093,17 +2272,17 @@ mod tests {
                     res = mock_listener.accept() => {
                         if let Ok((stream, _)) = res {
                             let req_tx = req_tx.clone();
+                            let req_tx = req_tx.clone();
                             tokio::spawn(async move {
                                 if let Ok(mut ws) = accept_async(stream).await {
                                     while let Some(Ok(msg)) = ws.next().await {
-                                        if let Message::Text(text) = msg {
-                                            if text.starts_with(r#"["REQ""#) {
+                                        if let Message::Text(text) = msg
+                                            && text.starts_with(r#"["REQ""#) {
                                                 let _ = req_tx.send(text.clone()).await;
                                                 let hist_evt = r#"["EVENT","goy-backfill",{"id":"hist_ts_1","created_at":1786000500,"content":"ts data"}]"#;
                                                 let eose = r#"["EOSE","goy-backfill"]"#;
                                                 let _ = ws.send(Message::Text(hist_evt.into())).await;
                                                 let _ = ws.send(Message::Text(eose.into())).await;
-                                            }
                                         }
                                     }
                                 }
@@ -2142,7 +2321,15 @@ mod tests {
         };
         let cancel_a = cancel.clone();
         tokio::spawn(async move {
-            let _ = run(cfg_a, mock_url, None, relay_events_rx_a, relay_publish_tx_a, cancel_a).await;
+            let _ = run(
+                cfg_a,
+                mock_url,
+                None,
+                relay_events_rx_a,
+                relay_publish_tx_a,
+                cancel_a,
+            )
+            .await;
         });
 
         tokio::time::sleep(Duration::from_millis(200)).await;
@@ -2178,7 +2365,15 @@ mod tests {
         let c_b1 = cancel_b1.clone();
         let dir_b1 = data_dir_b.clone();
         tokio::spawn(async move {
-            let _ = run(cfg_b.clone(), "ws://127.0.0.1:57777".to_string(), Some(dir_b1), relay_events_rx_b, relay_publish_tx_b, c_b1).await;
+            let _ = run(
+                cfg_b.clone(),
+                "ws://127.0.0.1:57777".to_string(),
+                Some(dir_b1),
+                relay_events_rx_b,
+                relay_publish_tx_b,
+                c_b1,
+            )
+            .await;
         });
 
         // Primeiro REQ recebido no Mock Relay deve ser since: 0
@@ -2197,7 +2392,7 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(400)).await;
 
         // Limpa mensagens REQ residuais no canal da primeira execução
-        while let Ok(_) = req_rx.try_recv() {}
+        while req_rx.try_recv().is_ok() {}
 
         // ── 3. Reinício do Node B (porta dinâmica, reutiliza data_dir_b) ──
         let tmp_listener_b2 = TcpListener::bind("127.0.0.1:0").await?;
@@ -2230,13 +2425,23 @@ mod tests {
         let c_b2 = cancel_b2.clone();
         let dir_b2 = data_dir_b.clone();
         tokio::spawn(async move {
-            let _ = run(cfg_b2, "ws://127.0.0.1:57777".to_string(), Some(dir_b2), relay_events_rx_b2, relay_publish_tx_b2, c_b2).await;
+            let _ = run(
+                cfg_b2,
+                "ws://127.0.0.1:57777".to_string(),
+                Some(dir_b2),
+                relay_events_rx_b2,
+                relay_publish_tx_b2,
+                c_b2,
+            )
+            .await;
         });
 
         // O segundo REQ recebido no Mock Relay deve usar o cursor salvo: since: 1786000500!
         let req_2 = tokio::time::timeout(Duration::from_secs(5), req_rx.recv())
             .await?
-            .ok_or_else(|| anyhow::anyhow!("Mock relay did not receive second REQ after restart"))?;
+            .ok_or_else(|| {
+                anyhow::anyhow!("Mock relay did not receive second REQ after restart")
+            })?;
         assert!(req_2.contains(r#""since":1786000500"#));
 
         cancel.cancel();
@@ -2251,10 +2456,22 @@ mod tests {
         let evt_v2 = r#"["EVENT",{"id":"id_v2","pubkey":"pub_alice","kind":0,"created_at":2000,"content":"name: Alice v2"}]"#;
 
         assert!(process_replaceable_event(&state, evt_v1));
-        assert_eq!(state.latest_replaceable.get("pub_alice:0").map(|r| r.value().clone()), Some((1000, "id_v1".to_string())));
+        assert_eq!(
+            state
+                .latest_replaceable
+                .get("pub_alice:0")
+                .map(|r| r.value().clone()),
+            Some((1000, "id_v1".to_string()))
+        );
 
         assert!(process_replaceable_event(&state, evt_v2));
-        assert_eq!(state.latest_replaceable.get("pub_alice:0").map(|r| r.value().clone()), Some((2000, "id_v2".to_string())));
+        assert_eq!(
+            state
+                .latest_replaceable
+                .get("pub_alice:0")
+                .map(|r| r.value().clone()),
+            Some((2000, "id_v2".to_string()))
+        );
     }
 
     #[tokio::test]
@@ -2265,9 +2482,18 @@ mod tests {
         let evt_v1 = r#"["EVENT",{"id":"id_v1","pubkey":"pub_alice","kind":0,"created_at":1000,"content":"name: Alice v1"}]"#;
 
         assert!(process_replaceable_event(&state, evt_v2));
-        assert!(!process_replaceable_event(&state, evt_v1), "Stale replaceable event must be discarded");
+        assert!(
+            !process_replaceable_event(&state, evt_v1),
+            "Stale replaceable event must be discarded"
+        );
 
-        assert_eq!(state.latest_replaceable.get("pub_alice:0").map(|r| r.value().clone()), Some((2000, "id_v2".to_string())));
+        assert_eq!(
+            state
+                .latest_replaceable
+                .get("pub_alice:0")
+                .map(|r| r.value().clone()),
+            Some((2000, "id_v2".to_string()))
+        );
     }
 
     #[tokio::test]
@@ -2280,9 +2506,18 @@ mod tests {
 
         assert!(process_replaceable_event(&state, backfill_v1));
         assert!(process_replaceable_event(&state, backfill_v3));
-        assert!(!process_replaceable_event(&state, backfill_v2), "v2 is older than v3, must be rejected");
+        assert!(
+            !process_replaceable_event(&state, backfill_v2),
+            "v2 is older than v3, must be rejected"
+        );
 
-        assert_eq!(state.latest_replaceable.get("pub_bob:3").map(|r| r.value().clone()), Some((300, "bf_3".to_string())));
+        assert_eq!(
+            state
+                .latest_replaceable
+                .get("pub_bob:3")
+                .map(|r| r.value().clone()),
+            Some((300, "bf_3".to_string()))
+        );
     }
 
     fn make_test_state() -> MeshState {
@@ -2322,8 +2557,14 @@ mod tests {
         let del_event = r#"["EVENT",{"id":"del_1","pubkey":"pub_alice","kind":5,"created_at":9000,"tags":[["e","target_event_1"],["e","target_event_2"]]}]"#;
         let result = process_deletion_event(&state, del_event);
         assert!(result, "Valid deletion event should return true");
-        assert!(state.deleted_ids.contains("target_event_1"), "target_event_1 must be deleted");
-        assert!(state.deleted_ids.contains("target_event_2"), "target_event_2 must be deleted");
+        assert!(
+            state.deleted_ids.contains("target_event_1"),
+            "target_event_1 must be deleted"
+        );
+        assert!(
+            state.deleted_ids.contains("target_event_2"),
+            "target_event_2 must be deleted"
+        );
     }
 
     #[tokio::test]
@@ -2336,7 +2577,10 @@ mod tests {
         // Now try to process it as a replaceable event
         let profile_evt = r#"["EVENT",{"id":"profile_evt_1","pubkey":"pub_alice","kind":0,"created_at":5000,"content":"name: Alice"}]"#;
         let accepted = process_replaceable_event(&state, profile_evt);
-        assert!(!accepted, "Deleted event must be rejected by process_replaceable_event");
+        assert!(
+            !accepted,
+            "Deleted event must be rejected by process_replaceable_event"
+        );
     }
 
     #[tokio::test]
@@ -2344,15 +2588,20 @@ mod tests {
         let state = make_test_state();
 
         // First register a replaceable event in the store
-        state.latest_replaceable.insert("pub_alice:0".to_string(), (1000, "profile_id_1".to_string()));
+        state.latest_replaceable.insert(
+            "pub_alice:0".to_string(),
+            (1000, "profile_id_1".to_string()),
+        );
         assert!(state.latest_replaceable.contains_key("pub_alice:0"));
 
         // Send a deletion event targeting the "a" coordinate "0:pub_alice"
         let del_event = r#"["EVENT",{"id":"del_a_1","pubkey":"pub_alice","kind":5,"created_at":9000,"tags":[["a","0:pub_alice"]]}]"#;
         process_deletion_event(&state, del_event);
 
-        assert!(!state.latest_replaceable.contains_key("pub_alice:0"),
-            "Replaceable event must be removed from store after 'a' tag deletion");
+        assert!(
+            !state.latest_replaceable.contains_key("pub_alice:0"),
+            "Replaceable event must be removed from store after 'a' tag deletion"
+        );
     }
 
     #[tokio::test]
@@ -2360,27 +2609,39 @@ mod tests {
         let state = make_test_state();
 
         // Mallory tries to delete Alice's replaceable event
-        state.latest_replaceable.insert("pub_alice:0".to_string(), (1000, "alice_profile".to_string()));
+        state.latest_replaceable.insert(
+            "pub_alice:0".to_string(),
+            (1000, "alice_profile".to_string()),
+        );
 
         let del_event = r#"["EVENT",{"id":"del_mal","pubkey":"pub_mallory","kind":5,"created_at":9000,"tags":[["a","0:pub_alice"]]}]"#;
         process_deletion_event(&state, del_event);
 
-        assert!(state.latest_replaceable.contains_key("pub_alice:0"),
-            "Deletion by wrong pubkey must be ignored");
+        assert!(
+            state.latest_replaceable.contains_key("pub_alice:0"),
+            "Deletion by wrong pubkey must be ignored"
+        );
     }
 
     #[tokio::test]
     async fn test_deletion_of_parameterized_replaceable_by_a_tag() {
         let state = make_test_state();
 
-        state.latest_replaceable.insert("pub_bob:30001:my-list".to_string(), (500, "list_event_id".to_string()));
+        state.latest_replaceable.insert(
+            "pub_bob:30001:my-list".to_string(),
+            (500, "list_event_id".to_string()),
+        );
 
         // Deletion via a tag: "30001:pub_bob:my-list"
         let del_event = r#"["EVENT",{"id":"del_list","pubkey":"pub_bob","kind":5,"created_at":9000,"tags":[["a","30001:pub_bob:my-list"]]}]"#;
         process_deletion_event(&state, del_event);
 
-        assert!(!state.latest_replaceable.contains_key("pub_bob:30001:my-list"),
-            "Parameterized replaceable event must be removed by 'a' tag deletion");
+        assert!(
+            !state
+                .latest_replaceable
+                .contains_key("pub_bob:30001:my-list"),
+            "Parameterized replaceable event must be removed by 'a' tag deletion"
+        );
     }
 
     #[tokio::test]
@@ -2393,7 +2654,10 @@ mod tests {
         // Now this event arrives during backfill
         let backfill_evt = r#"["EVENT","sub_bf",{"id":"historical_evt_99","pubkey":"pub_carol","kind":1,"created_at":1000,"content":"Hello"}]"#;
         let accepted = process_replaceable_event(&state, backfill_evt);
-        assert!(!accepted, "Event deleted before backfill arrival must be discarded");
+        assert!(
+            !accepted,
+            "Event deleted before backfill arrival must be discarded"
+        );
     }
 
     // ── NIP-40: Expirable Events ─────────────────────────────────────────
@@ -2405,7 +2669,10 @@ mod tests {
         let raw = r#"["EVENT",{"id":"exp_evt_1","pubkey":"pub_alice","kind":1,"created_at":1000,"tags":[["expiration","1"]],"content":"old"}]"#;
         let accepted = process_expiry_check(&state, raw);
         assert!(!accepted, "Already-expired event must be rejected");
-        assert!(!state.expiring_events.contains_key("exp_evt_1"), "Expired event must not be registered in expiring_events");
+        assert!(
+            !state.expiring_events.contains_key("exp_evt_1"),
+            "Expired event must not be registered in expiring_events"
+        );
     }
 
     #[test]
@@ -2415,8 +2682,14 @@ mod tests {
         let raw = r#"["EVENT",{"id":"exp_evt_2","pubkey":"pub_alice","kind":1,"created_at":9000,"tags":[["expiration","9999999999"]],"content":"future"}]"#;
         let accepted = process_expiry_check(&state, raw);
         assert!(accepted, "Event with future expiration must be accepted");
-        assert!(state.expiring_events.contains_key("exp_evt_2"), "Future expiration must be registered in expiring_events");
-        assert_eq!(state.expiring_events.get("exp_evt_2").map(|v| *v), Some(9999999999u64));
+        assert!(
+            state.expiring_events.contains_key("exp_evt_2"),
+            "Future expiration must be registered in expiring_events"
+        );
+        assert_eq!(
+            state.expiring_events.get("exp_evt_2").map(|v| *v),
+            Some(9999999999u64)
+        );
     }
 
     #[test]
@@ -2424,8 +2697,14 @@ mod tests {
         let state = make_test_state();
         let raw = r#"["EVENT",{"id":"no_exp_evt","pubkey":"pub_alice","kind":1,"created_at":1000,"content":"no expiry"}]"#;
         let accepted = process_expiry_check(&state, raw);
-        assert!(accepted, "Event without expiration tag must always be accepted");
-        assert!(!state.expiring_events.contains_key("no_exp_evt"), "Event without expiration must not be tracked");
+        assert!(
+            accepted,
+            "Event without expiration tag must always be accepted"
+        );
+        assert!(
+            !state.expiring_events.contains_key("no_exp_evt"),
+            "Event without expiration must not be tracked"
+        );
     }
 
     #[tokio::test]
@@ -2436,10 +2715,14 @@ mod tests {
         let past_exp = 1u64; // already expired
 
         state.seen_ids.insert("evt_future".to_string());
-        state.expiring_events.insert("evt_future".to_string(), future_exp);
+        state
+            .expiring_events
+            .insert("evt_future".to_string(), future_exp);
 
         state.seen_ids.insert("evt_past".to_string());
-        state.expiring_events.insert("evt_past".to_string(), past_exp);
+        state
+            .expiring_events
+            .insert("evt_past".to_string(), past_exp);
 
         // Run cleanup with a very short interval; just tick manually by calling the retain logic
         // We simulate by calling the cleanup inline with the current time
@@ -2457,10 +2740,22 @@ mod tests {
         });
 
         assert_eq!(expired_count, 1, "Only one event should be expired");
-        assert!(!state.expiring_events.contains_key("evt_past"), "Past event must be removed from expiring_events");
-        assert!(!state.seen_ids.contains("evt_past"), "Past event must be removed from seen_ids");
-        assert!(state.expiring_events.contains_key("evt_future"), "Future event must remain in expiring_events");
-        assert!(state.seen_ids.contains("evt_future"), "Future event must remain in seen_ids");
+        assert!(
+            !state.expiring_events.contains_key("evt_past"),
+            "Past event must be removed from expiring_events"
+        );
+        assert!(
+            !state.seen_ids.contains("evt_past"),
+            "Past event must be removed from seen_ids"
+        );
+        assert!(
+            state.expiring_events.contains_key("evt_future"),
+            "Future event must remain in expiring_events"
+        );
+        assert!(
+            state.seen_ids.contains("evt_future"),
+            "Future event must remain in seen_ids"
+        );
     }
 
     #[tokio::test]
@@ -2468,8 +2763,13 @@ mod tests {
         let state = Arc::new(make_test_state());
 
         // Register a replaceable event that will expire
-        state.latest_replaceable.insert("pub_alice:0".to_string(), (1000, "expiring_profile".to_string()));
-        state.expiring_events.insert("expiring_profile".to_string(), 1u64); // already expired
+        state.latest_replaceable.insert(
+            "pub_alice:0".to_string(),
+            (1000, "expiring_profile".to_string()),
+        );
+        state
+            .expiring_events
+            .insert("expiring_profile".to_string(), 1u64); // already expired
 
         // Simulate cleanup
         let now_ts = chrono::Utc::now().timestamp() as u64;
@@ -2483,8 +2783,10 @@ mod tests {
             }
         });
 
-        assert!(!state.latest_replaceable.contains_key("pub_alice:0"),
-            "Expired replaceable event must be removed from latest_replaceable");
+        assert!(
+            !state.latest_replaceable.contains_key("pub_alice:0"),
+            "Expired replaceable event must be removed from latest_replaceable"
+        );
     }
 
     #[test]
@@ -2493,7 +2795,10 @@ mod tests {
         // Invalid expiration value — should be treated as no expiration
         let raw = r#"["EVENT",{"id":"bad_exp_evt","pubkey":"pub_alice","kind":1,"created_at":1000,"tags":[["expiration","not-a-ts"]],"content":"bad"}]"#;
         let accepted = process_expiry_check(&state, raw);
-        assert!(accepted, "Event with invalid expiration tag must be accepted (treated as no expiration)");
+        assert!(
+            accepted,
+            "Event with invalid expiration tag must be accepted (treated as no expiration)"
+        );
         assert!(!state.expiring_events.contains_key("bad_exp_evt"));
     }
 
@@ -2503,10 +2808,9 @@ mod tests {
         // Backfill event with expiration already in the past
         let raw = r#"["EVENT","sub_bf",{"id":"old_exp","pubkey":"pub_bob","kind":1,"created_at":100,"tags":[["expiration","2"]],"content":"stale"}]"#;
         let accepted = process_expiry_check(&state, raw);
-        assert!(!accepted, "Expired event arriving via backfill must be discarded");
+        assert!(
+            !accepted,
+            "Expired event arriving via backfill must be discarded"
+        );
     }
 }
-
-
-
-

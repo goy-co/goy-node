@@ -54,8 +54,10 @@ impl PeerRateLimiter {
         let now = Instant::now();
         let elapsed = now.duration_since(self.last_refill).as_secs_f64();
         if elapsed > 0.0 {
-            self.event_tokens = (self.event_tokens + elapsed * self.event_refill_rate).min(self.event_capacity);
-            self.byte_tokens = (self.byte_tokens + elapsed * self.byte_refill_rate).min(self.byte_capacity);
+            self.event_tokens =
+                (self.event_tokens + elapsed * self.event_refill_rate).min(self.event_capacity);
+            self.byte_tokens =
+                (self.byte_tokens + elapsed * self.byte_refill_rate).min(self.byte_capacity);
             self.last_refill = now;
         }
     }
