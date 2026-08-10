@@ -14,7 +14,9 @@ use tracing_subscriber::{EnvFilter, fmt};
 
 mod config;
 mod event_types;
+mod http;
 mod mesh;
+mod metrics;
 mod rate_limiter;
 mod registry;
 mod relay;
@@ -99,8 +101,9 @@ async fn main() -> anyhow::Result<()> {
     info!("✔ Relay connection started");
 
     // ── Mesh Agent ─────────────────────────────────────────────────────
-    let mesh_handle = tokio::spawn(mesh::run(
+    let mesh_handle = tokio::spawn(mesh::run_with_http_listen(
         cfg.mesh,
+        cfg.metrics.listen,
         cfg.relay.url.clone(),
         Some(data_dir),
         relay_events,

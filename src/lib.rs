@@ -1,6 +1,8 @@
 pub mod config;
 pub mod event_types;
+pub mod http;
 pub mod mesh;
+pub mod metrics;
 pub mod rate_limiter;
 pub mod registry;
 pub mod relay;

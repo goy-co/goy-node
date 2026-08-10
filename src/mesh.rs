@@ -22,6 +22,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
 use crate::config::MeshConfig;
+use crate::metrics::{EventSource, Metrics};
 use crate::registry::{self, RegistryClient, RelayInfo};
 use crate::relay::RelayEvent;
 use crate::tls::{FingerprintStore, NodeCertificate, TrustDecision};
@@ -102,6 +103,8 @@ pub struct MeshState {
     pub events_rate_limited: AtomicU64,
     pub bytes_rate_limited: AtomicU64,
     pub messages_oversized: AtomicU64,
+    /// Struct de métricas Prometheus partilhado com o servidor HTTP.
+    pub metrics: Arc<Metrics>,
     /// WebSocket URL do relay local para consultas de backfill.
     pub relay_url: String,
     /// Diretório para persistência de estado em disco (opcional).
@@ -186,8 +189,10 @@ pub fn replicate_event(
     let msg = Message::Text(event_raw.into());
     for target in targets {
         if let Some(tx) = state.peer_channels.get(&target) {
-            let _ = tx.value().try_send(msg.clone());
-            state.events_replicated.fetch_add(1, Ordering::Relaxed);
+            if tx.value().try_send(msg.clone()).is_ok() {
+                state.events_replicated.fetch_add(1, Ordering::Relaxed);
+                state.metrics.events_replicated.fetch_add(1, Ordering::Relaxed);
+            }
         }
     }
 }
@@ -258,6 +263,7 @@ pub fn process_deletion_event(state: &MeshState, raw_event: &str) -> bool {
     let e_tags = crate::event_types::extract_e_tags(&event_obj);
     for target_id in &e_tags {
         state.deleted_ids.insert(target_id.clone());
+        state.metrics.events_deleted.fetch_add(1, Ordering::Relaxed);
         // Também remover de latest_replaceable se esse evento era substituível
         state.latest_replaceable.retain(|_, v| v.1 != *target_id);
         info!("🗑️ Deleted event {target_id} by {del_pubkey} (tag e)");
@@ -274,6 +280,7 @@ pub fn process_deletion_event(state: &MeshState, raw_event: &str) -> bool {
             continue;
         }
         if state.latest_replaceable.remove(coord_key).is_some() {
+            state.metrics.events_deleted.fetch_add(1, Ordering::Relaxed);
             info!("🗑️ Deleted replaceable event at coord {coord_key} by {del_pubkey} (tag a)");
         }
     }
@@ -337,6 +344,7 @@ pub async fn run_expiry_cleanup_task(
                 });
 
                 if expired_count > 0 {
+                    state.metrics.events_expired.fetch_add(expired_count, Ordering::Relaxed);
                     info!("🧹 Expired {expired_count} events (NIP-40 cleanup)");
                 }
 
@@ -485,6 +493,7 @@ impl Drop for PeerGuard {
         self.state.connected_peers.remove(&self.peer_id);
         self.state.peer_channels.remove(&self.peer_id);
         self.state.rate_limiters.remove(&self.peer_id);
+        self.state.metrics.dec_peers_connected();
     }
 }
 
@@ -525,11 +534,35 @@ pub async fn run(
     cfg: MeshConfig,
     relay_url: String,
     data_dir: Option<PathBuf>,
+    relay_events: broadcast::Receiver<RelayEvent>,
+    relay_publish_tx: mpsc::Sender<String>,
+    cancel: CancellationToken,
+) -> anyhow::Result<()> {
+    run_with_http_listen(
+        cfg,
+        None,
+        relay_url,
+        data_dir,
+        relay_events,
+        relay_publish_tx,
+        cancel,
+    )
+    .await
+}
+
+/// Inicia o mesh agent com suporte opcional a um servidor HTTP local de observabilidade (`metrics.listen`).
+pub async fn run_with_http_listen(
+    cfg: MeshConfig,
+    metrics_listen: Option<String>,
+    relay_url: String,
+    data_dir: Option<PathBuf>,
     mut relay_events: broadcast::Receiver<RelayEvent>,
     relay_publish_tx: mpsc::Sender<String>,
     cancel: CancellationToken,
 ) -> anyhow::Result<()> {
     let (seen_ids, deleted_ids, peer_cursors) = load_state(data_dir.as_deref());
+
+    let metrics = Arc::new(Metrics::new());
 
     let state = Arc::new(MeshState {
         seen_ids,
@@ -550,6 +583,7 @@ pub async fn run(
         events_rate_limited: AtomicU64::new(0),
         bytes_rate_limited: AtomicU64::new(0),
         messages_oversized: AtomicU64::new(0),
+        metrics: metrics.clone(),
         relay_url,
         data_dir: data_dir.clone(),
     });
@@ -569,6 +603,26 @@ pub async fn run(
         None
     };
     let cert_fingerprint = tls_ctx.as_ref().map(|c| c.cert.fingerprint.clone());
+
+    // ── Servidor HTTP de Observabilidade (Prometheus + Health) ─────────
+    if let Some(listen_addr) = metrics_listen {
+        let node_info = crate::http::NodeInfo {
+            version: env!("CARGO_PKG_VERSION").to_string(),
+            node_id: node_id.clone(),
+            cert_fingerprint: cert_fingerprint.clone(),
+            relay_url: state.relay_url.clone(),
+            mesh_listen: cfg.listen.clone(),
+            replication_factor: cfg.replication_factor,
+            tls_enabled: cfg.tls_enabled,
+        };
+        let m = metrics.clone();
+        let c = cancel.clone();
+        tokio::spawn(async move {
+            if let Err(e) = crate::http::run_http_server(listen_addr, m, node_info, c).await {
+                error!("❌ HTTP observability server failed: {e}");
+            }
+        });
+    }
 
     // ── Listener para peers ────────────────────────────────────────────
     let listener = TcpListener::bind(&cfg.listen).await?;
@@ -598,6 +652,7 @@ pub async fn run(
                                 // Verificar substituição e deduplicação
                                 if process_replaceable_event(&state_clone, &event.raw) {
                                     if state_clone.seen_ids.insert(id.clone()) {
+                                        state_clone.metrics.inc_events_received(EventSource::Relay);
                                         info!("📡 Local relay event {id} received, replicating to peers");
                                         replicate_event(&state_clone, &id, &event.raw, None);
                                     } else {
@@ -1077,6 +1132,7 @@ async fn handle_peer_stream<Si, St>(
         warn!("⚠️ Already connected to peer {peer_id}, skipping duplicate session");
         return;
     }
+    state.metrics.inc_peers_connected();
 
     // Canal interno para enviar mensagens ao peer (heartbeats, OK, EOSE, backfill, eventos replicados)
     let (ctrl_tx, mut ctrl_rx) = mpsc::channel::<Message>(256);
@@ -1143,6 +1199,7 @@ async fn handle_peer_stream<Si, St>(
                         // 1. Verificação de tamanho máximo de mensagem (antes de qualquer parsing)
                         if msg_bytes > state.max_msg_size {
                             state.messages_oversized.fetch_add(1, Ordering::Relaxed);
+                            state.metrics.messages_oversized.fetch_add(1, Ordering::Relaxed);
                             warn!(
                                 "⚠️ Oversized message from peer {peer_id}: {msg_bytes} bytes > max {}",
                                 state.max_msg_size
@@ -1170,9 +1227,11 @@ async fn handle_peer_stream<Si, St>(
                                 match reason {
                                     crate::rate_limiter::RateLimitReason::EventsExhausted => {
                                         state.events_rate_limited.fetch_add(1, Ordering::Relaxed);
+                                        state.metrics.events_rate_limited.fetch_add(1, Ordering::Relaxed);
                                     }
                                     crate::rate_limiter::RateLimitReason::BytesExhausted => {
                                         state.bytes_rate_limited.fetch_add(1, Ordering::Relaxed);
+                                        state.metrics.events_rate_limited.fetch_add(1, Ordering::Relaxed);
                                     }
                                 }
                                 if !limiter.warned {
@@ -1186,6 +1245,7 @@ async fn handle_peer_stream<Si, St>(
                         }
 
                         if text.starts_with(r#"["REQ""#) {
+                            state.metrics.backfill_requests.fetch_add(1, Ordering::Relaxed);
                             if let Some((sub_id, filter)) = parse_req_msg(&text) {
                                 let relay_url = state.relay_url.clone();
                                 let peer_id = peer_id.clone();
@@ -1195,6 +1255,7 @@ async fn handle_peer_stream<Si, St>(
                                 });
                             }
                         } else if text.starts_with(r#"["EVENT""#) {
+                            state.metrics.inc_events_received(EventSource::Peer);
                             if let Some(id) = extract_event_id(&text) {
                                 if let Some(ts) = extract_event_timestamp(&text) {
                                     state
@@ -2087,6 +2148,7 @@ mod tests {
             events_rate_limited: AtomicU64::new(0),
             bytes_rate_limited: AtomicU64::new(0),
             messages_oversized: AtomicU64::new(0),
+            metrics: Arc::new(Metrics::new()),
             relay_url: "ws://127.0.0.1:7777".to_string(),
             data_dir: None,
         }

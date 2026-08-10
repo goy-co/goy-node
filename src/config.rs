@@ -34,12 +34,19 @@ tls_enabled = true
 # Fingerprints SHA-256 pré-aprovados (têm prioridade sobre trust-on-first-use)
 # [mesh.trusted_fingerprints]
 # "ws://peer1:8443" = "a1b2c3..."
+
+[metrics]
+# Endereço e porta onde o servidor HTTP de observabilidade escuta (apenas localhost).
+# Definir como "" ou "off" para desativar.
+listen = "127.0.0.1:9090"
 "#;
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct Config {
     pub relay: RelayConfig,
     pub mesh: MeshConfig,
+    #[serde(default)]
+    pub metrics: MetricsConfig,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -88,6 +95,26 @@ pub struct MeshConfig {
     /// Têm prioridade sobre o trust-on-first-use.
     #[serde(default)]
     pub trusted_fingerprints: std::collections::HashMap<String, String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct MetricsConfig {
+    /// Endereço onde o servidor HTTP de métricas escuta (ex: "127.0.0.1:9090").
+    /// `None` desativa o servidor HTTP.
+    #[serde(default = "default_metrics_listen")]
+    pub listen: Option<String>,
+}
+
+fn default_metrics_listen() -> Option<String> {
+    Some("127.0.0.1:9090".to_string())
+}
+
+impl Default for MetricsConfig {
+    fn default() -> Self {
+        Self {
+            listen: default_metrics_listen(),
+        }
+    }
 }
 
 fn default_heartbeat() -> u64 {
@@ -237,6 +264,22 @@ impl Config {
                 self.mesh.max_message_size = v;
             }
         }
+
+        if let Ok(listen) = std::env::var("GOY_NODE_METRICS_LISTEN") {
+            let trimmed = listen.trim();
+            if trimmed.is_empty()
+                || matches!(
+                    trimmed.to_ascii_lowercase().as_str(),
+                    "none" | "off" | "false" | "0"
+                )
+            {
+                info!("🔧 Override from env GOY_NODE_METRICS_LISTEN: disabled");
+                self.metrics.listen = None;
+            } else {
+                info!("🔧 Override from env GOY_NODE_METRICS_LISTEN: {trimmed}");
+                self.metrics.listen = Some(trimmed.to_string());
+            }
+        }
     }
 
     /// Valida rigorosamente todos os campos da configuração.
@@ -255,6 +298,16 @@ impl Config {
                 "Invalid mesh.listen '{}': must be a valid socket address (e.g. '0.0.0.0:8443')",
                 self.mesh.listen
             );
+        }
+
+        // 3. Valida metrics.listen se definido
+        if let Some(ref listen) = self.metrics.listen {
+            if listen.parse::<SocketAddr>().is_err() {
+                anyhow::bail!(
+                    "Invalid metrics.listen '{}': must be a valid socket address (e.g. '127.0.0.1:9090')",
+                    listen
+                );
+            }
         }
 
         // 3. Valida mesh.seeds
@@ -331,6 +384,7 @@ impl Default for Config {
                 import_cmd: None,
             },
             mesh: MeshConfig::default(),
+            metrics: MetricsConfig::default(),
         }
     }
 }
