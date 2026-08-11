@@ -295,6 +295,7 @@ pub async fn run_onboard(
     if tailscale_available {
         let mut cmd = Command::new("tailscale");
         cmd.arg("up")
+            .arg("--reset")
             .arg(format!("--authkey={vpn_key_to_use}"))
             .arg("--accept-routes");
 
