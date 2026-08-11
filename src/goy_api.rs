@@ -29,6 +29,8 @@ pub struct NodeRegisterResponse {
     pub node_id: String,
     pub vpn_auth_key: Option<String>,
     pub vpn_control_url: Option<String>,
+    #[serde(default)]
+    pub provider: Option<String>,
     pub bearer_token: String,
     pub message: String,
 }
@@ -77,6 +79,7 @@ impl GoyApiClient {
                 node_id: mock_id,
                 vpn_auth_key: Some(format!("tskey-auth-{auth_key}-mock")),
                 vpn_control_url: Some("https://headscale.goyco.xyz".to_string()),
+                provider: Some("headscale".to_string()),
                 bearer_token: "goy_bearer_mock_token_999".to_string(),
                 message: "Mock registration successful".to_string(),
             });
@@ -153,5 +156,43 @@ mod tests {
 
         assert_eq!(res.node_id, "node-test-1");
         assert!(res.vpn_auth_key.unwrap().contains("gc_test_key_12345"));
+        assert_eq!(res.provider, Some("headscale".to_string()));
+    }
+
+    #[test]
+    fn test_node_register_response_deserialization_provider() -> anyhow::Result<()> {
+        let json_tailscale = r#"{
+            "node_id": "node-ts-1",
+            "vpn_auth_key": "tskey-auth-123",
+            "vpn_control_url": null,
+            "provider": "tailscale",
+            "bearer_token": "token-123",
+            "message": "ok"
+        }"#;
+        let res1: NodeRegisterResponse = serde_json::from_str(json_tailscale)?;
+        assert_eq!(res1.provider, Some("tailscale".to_string()));
+
+        let json_headscale = r#"{
+            "node_id": "node-hs-1",
+            "vpn_auth_key": "hskey-auth-123",
+            "vpn_control_url": "https://hs.goyco.xyz",
+            "provider": "headscale",
+            "bearer_token": "token-456",
+            "message": "ok"
+        }"#;
+        let res2: NodeRegisterResponse = serde_json::from_str(json_headscale)?;
+        assert_eq!(res2.provider, Some("headscale".to_string()));
+
+        let json_legacy = r#"{
+            "node_id": "node-legacy",
+            "vpn_auth_key": "key-789",
+            "vpn_control_url": "https://hs.goyco.xyz",
+            "bearer_token": "token-789",
+            "message": "ok"
+        }"#;
+        let res3: NodeRegisterResponse = serde_json::from_str(json_legacy)?;
+        assert_eq!(res3.provider, None);
+
+        Ok(())
     }
 }

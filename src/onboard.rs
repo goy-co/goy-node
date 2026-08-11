@@ -22,6 +22,8 @@ pub struct OnboardState {
     pub vpn_configured_at: u64,
     pub api_registered_at: u64,
     pub bearer_token: Option<String>,
+    #[serde(default)]
+    pub provider: Option<String>,
 }
 
 /// Estado persistido da VPN (`data_dir/vpn_state.json`).
@@ -31,6 +33,8 @@ pub struct VpnState {
     pub magic_dns: Option<String>,
     pub client_type: String,
     pub configured_at: u64,
+    #[serde(default)]
+    pub provider: Option<String>,
 }
 
 /// Lê o estado de onboarding de `data_dir/onboard_state.json`.
@@ -204,7 +208,13 @@ pub async fn run_onboard(
     let api_url = std::env::var("GOY_API_URL").ok();
     let api_client = GoyApiClient::new(api_url.as_deref());
 
-    let (registered_node_id, vpn_key_to_use, bearer_token) = if !vpn_only {
+    let (
+        registered_node_id,
+        vpn_key_to_use,
+        vpn_control_url_to_use,
+        vpn_provider_to_use,
+        bearer_token,
+    ) = if !vpn_only {
         match api_client.register_node(&auth_key, Some(&node_id)).await {
             Ok(res) => {
                 info!(
@@ -214,6 +224,8 @@ pub async fn run_onboard(
                 (
                     res.node_id,
                     res.vpn_auth_key.unwrap_or_else(|| auth_key.clone()),
+                    res.vpn_control_url,
+                    res.provider,
                     Some(res.bearer_token),
                 )
             }
@@ -224,8 +236,55 @@ pub async fn run_onboard(
         }
     } else {
         info!("ℹ️ Skipping API registration (--vpn-only mode)");
-        (node_id, auth_key.clone(), None)
+        (node_id, auth_key.clone(), None, None, None)
     };
+
+    // Determinar modo de VPN efetivo (Tailscale vs Headscale com fallback legacy)
+    let (effective_provider, is_fallback) = match vpn_provider_to_use.as_deref() {
+        Some("tailscale") => ("tailscale", false),
+        Some("headscale") => ("headscale", false),
+        Some(other) => {
+            warn!("⚠️ Desconhecido VPN provider '{other}'. A recorrer à lógica legacy...");
+            if vpn_control_url_to_use
+                .as_ref()
+                .is_some_and(|u| !u.trim().is_empty())
+            {
+                ("headscale", true)
+            } else {
+                ("tailscale", true)
+            }
+        }
+        None => {
+            if vpn_control_url_to_use
+                .as_ref()
+                .is_some_and(|u| !u.trim().is_empty())
+            {
+                ("headscale", true)
+            } else {
+                ("tailscale", true)
+            }
+        }
+    };
+
+    // Validação de inputs por provider
+    if effective_provider == "tailscale" {
+        if vpn_key_to_use.trim().is_empty() {
+            error!("❌ Erro na configuração VPN (Tailscale): auth_key está vazia.");
+            return Ok(3);
+        }
+    } else if effective_provider == "headscale" {
+        if vpn_key_to_use.trim().is_empty() {
+            error!("❌ Erro na configuração VPN (Headscale): auth_key está vazia.");
+            return Ok(3);
+        }
+        if vpn_control_url_to_use
+            .as_ref()
+            .is_none_or(|u| u.trim().is_empty())
+        {
+            error!("❌ Erro na configuração VPN (Headscale): control_url está vazio.");
+            return Ok(3);
+        }
+    }
 
     // 3. Configurar cliente VPN (Tailscale/Headscale)
     info!("🔒 Configuring VPN connection...");
@@ -234,12 +293,26 @@ pub async fn run_onboard(
     let mut vpn_ip = None;
 
     if tailscale_available {
-        info!("🌀 Found Tailscale CLI. Joining Goy VPN network...");
-        let up_res = Command::new("tailscale")
-            .arg("up")
+        let mut cmd = Command::new("tailscale");
+        cmd.arg("up")
             .arg(format!("--authkey={vpn_key_to_use}"))
-            .arg("--accept-routes")
-            .output();
+            .arg("--accept-routes");
+
+        if effective_provider == "headscale" {
+            let ctrl_url = vpn_control_url_to_use.as_deref().unwrap_or_default();
+            if is_fallback {
+                info!("🔗 A configurar VPN via Headscale (legacy fallback: {ctrl_url})...");
+            } else {
+                info!("🔗 A configurar VPN via Headscale (self-hosted: {ctrl_url})...");
+            }
+            cmd.arg(format!("--login-server={ctrl_url}"));
+        } else if is_fallback {
+            info!("🔗 A configurar VPN via Tailscale (legacy fallback)...");
+        } else {
+            info!("🔗 A configurar VPN via Tailscale (SaaS)...");
+        }
+
+        let up_res = cmd.output();
 
         match up_res {
             Ok(out) if out.status.success() => {
@@ -299,6 +372,7 @@ pub async fn run_onboard(
         vpn_configured_at: now,
         api_registered_at: now,
         bearer_token,
+        provider: Some(effective_provider.to_string()),
     };
 
     fs::write(
@@ -311,11 +385,12 @@ pub async fn run_onboard(
         vpn_ip: Some(target_mesh_url.clone()),
         magic_dns: None,
         client_type: if tailscale_available {
-            "tailscale".to_string()
+            effective_provider.to_string()
         } else {
             "none".to_string()
         },
         configured_at: now,
+        provider: Some(effective_provider.to_string()),
     };
 
     fs::write(
