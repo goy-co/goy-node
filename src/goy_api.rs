@@ -23,16 +23,61 @@ pub struct NodeRegisterRequest {
     pub os: String,
 }
 
+/// Configuração de VPN retornada pela API no registo do nó.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VpnConfig {
+    pub auth_key: String,
+    #[serde(default)]
+    pub control_url: Option<String>,
+    #[serde(default)]
+    pub provider: Option<String>,
+}
+
 /// Response devolvida pela API ao registar o nó.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NodeRegisterResponse {
     pub node_id: String,
+    #[serde(default)]
+    pub vpn_config: Option<VpnConfig>,
+    #[serde(default)]
+    pub registry_url: Option<String>,
+    #[serde(default)]
+    pub created_at: Option<String>,
+
+    // Campos de compatibilidade para respostas flat/legacy ou mocks antigos
+    #[serde(default)]
     pub vpn_auth_key: Option<String>,
+    #[serde(default)]
     pub vpn_control_url: Option<String>,
     #[serde(default)]
     pub provider: Option<String>,
-    pub bearer_token: String,
-    pub message: String,
+    #[serde(default)]
+    pub bearer_token: Option<String>,
+    #[serde(default)]
+    pub message: Option<String>,
+}
+
+impl NodeRegisterResponse {
+    pub fn get_vpn_auth_key(&self) -> Option<String> {
+        self.vpn_config
+            .as_ref()
+            .map(|c| c.auth_key.clone())
+            .or_else(|| self.vpn_auth_key.clone())
+    }
+
+    pub fn get_vpn_control_url(&self) -> Option<String> {
+        self.vpn_config
+            .as_ref()
+            .and_then(|c| c.control_url.clone())
+            .or_else(|| self.vpn_control_url.clone())
+    }
+
+    pub fn get_vpn_provider(&self) -> Option<String> {
+        self.vpn_config
+            .as_ref()
+            .and_then(|c| c.provider.clone())
+            .or_else(|| self.provider.clone())
+    }
 }
 
 /// Cliente HTTP da API Goy Company.
@@ -77,13 +122,25 @@ impl GoyApiClient {
             let mock_id = node_id.unwrap_or("node-mock-12345").to_string();
             return Ok(NodeRegisterResponse {
                 node_id: mock_id,
-                vpn_auth_key: Some(format!("tskey-auth-{auth_key}-mock")),
-                vpn_control_url: Some("https://headscale.goyco.xyz".to_string()),
-                provider: Some("headscale".to_string()),
-                bearer_token: "goy_bearer_mock_token_999".to_string(),
-                message: "Mock registration successful".to_string(),
+                vpn_config: Some(VpnConfig {
+                    auth_key: format!("tskey-auth-{auth_key}-mock"),
+                    control_url: Some("https://headscale.goyco.xyz".to_string()),
+                    provider: Some("headscale".to_string()),
+                }),
+                registry_url: Some("https://registry.goyco.xyz".to_string()),
+                created_at: Some("2026-08-11T23:57:00Z".to_string()),
+                vpn_auth_key: None,
+                vpn_control_url: None,
+                provider: None,
+                bearer_token: Some("goy_bearer_mock_token_999".to_string()),
+                message: Some("Mock registration successful".to_string()),
             });
         }
+
+        let bearer_key = std::env::var("GOY_ADMIN_API_KEY")
+            .ok()
+            .filter(|k| !k.trim().is_empty())
+            .unwrap_or_else(|| auth_key.to_string());
 
         let endpoint = format!("{}/v1/nodes/register", self.base_url);
         let req_body = NodeRegisterRequest {
@@ -93,7 +150,13 @@ impl GoyApiClient {
         };
 
         info!("🌐 Connecting to Goy Company API at {endpoint}...");
-        let resp = self.http.post(&endpoint).json(&req_body).send().await?;
+        let resp = self
+            .http
+            .post(&endpoint)
+            .bearer_auth(bearer_key)
+            .json(&req_body)
+            .send()
+            .await?;
 
         if !resp.status().is_success() {
             let status = resp.status();
@@ -155,8 +218,48 @@ mod tests {
             .unwrap();
 
         assert_eq!(res.node_id, "node-test-1");
-        assert!(res.vpn_auth_key.unwrap().contains("gc_test_key_12345"));
-        assert_eq!(res.provider, Some("headscale".to_string()));
+        assert!(
+            res.get_vpn_auth_key()
+                .unwrap()
+                .contains("gc_test_key_12345")
+        );
+        assert_eq!(res.get_vpn_provider(), Some("headscale".to_string()));
+        assert_eq!(
+            res.registry_url,
+            Some("https://registry.goyco.xyz".to_string())
+        );
+    }
+
+    #[test]
+    fn test_node_register_response_deserialization_nested_vpn_config() -> anyhow::Result<()> {
+        let json_coord_server = r#"{
+            "node_id": "node-cs-1",
+            "vpn_config": {
+                "auth_key": "tskey-auth-nested-123",
+                "control_url": "https://headscale.goyco.xyz",
+                "provider": "headscale"
+            },
+            "registry_url": "https://registry.goyco.xyz",
+            "created_at": "2026-08-11T23:57:00Z"
+        }"#;
+
+        let res: NodeRegisterResponse = serde_json::from_str(json_coord_server)?;
+        assert_eq!(res.node_id, "node-cs-1");
+        assert_eq!(
+            res.get_vpn_auth_key(),
+            Some("tskey-auth-nested-123".to_string())
+        );
+        assert_eq!(
+            res.get_vpn_control_url(),
+            Some("https://headscale.goyco.xyz".to_string())
+        );
+        assert_eq!(res.get_vpn_provider(), Some("headscale".to_string()));
+        assert_eq!(
+            res.registry_url,
+            Some("https://registry.goyco.xyz".to_string())
+        );
+
+        Ok(())
     }
 
     #[test]
@@ -170,7 +273,7 @@ mod tests {
             "message": "ok"
         }"#;
         let res1: NodeRegisterResponse = serde_json::from_str(json_tailscale)?;
-        assert_eq!(res1.provider, Some("tailscale".to_string()));
+        assert_eq!(res1.get_vpn_provider(), Some("tailscale".to_string()));
 
         let json_headscale = r#"{
             "node_id": "node-hs-1",
@@ -181,7 +284,7 @@ mod tests {
             "message": "ok"
         }"#;
         let res2: NodeRegisterResponse = serde_json::from_str(json_headscale)?;
-        assert_eq!(res2.provider, Some("headscale".to_string()));
+        assert_eq!(res2.get_vpn_provider(), Some("headscale".to_string()));
 
         let json_legacy = r#"{
             "node_id": "node-legacy",
@@ -191,8 +294,24 @@ mod tests {
             "message": "ok"
         }"#;
         let res3: NodeRegisterResponse = serde_json::from_str(json_legacy)?;
-        assert_eq!(res3.provider, None);
+        assert_eq!(res3.get_vpn_provider(), None);
 
         Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_goy_admin_api_key_env_var_override() {
+        unsafe {
+            std::env::set_var("GOY_ADMIN_API_KEY", "admin_secret_key_123");
+        }
+        let client = GoyApiClient::new(Some("http://mock.local"));
+        let res = client
+            .register_node("gc_test_key_12345", Some("node-admin-test"))
+            .await;
+        assert!(res.is_ok());
+
+        unsafe {
+            std::env::remove_var("GOY_ADMIN_API_KEY");
+        }
     }
 }

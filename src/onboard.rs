@@ -214,6 +214,7 @@ pub async fn run_onboard(
         vpn_control_url_to_use,
         vpn_provider_to_use,
         bearer_token,
+        registry_url_from_api,
     ) = if !vpn_only {
         match api_client.register_node(&auth_key, Some(&node_id)).await {
             Ok(res) => {
@@ -221,13 +222,12 @@ pub async fn run_onboard(
                     "✅ Successfully registered node {} with Goy Company API!",
                     res.node_id
                 );
-                (
-                    res.node_id,
-                    res.vpn_auth_key.unwrap_or_else(|| auth_key.clone()),
-                    res.vpn_control_url,
-                    res.provider,
-                    Some(res.bearer_token),
-                )
+                let vpn_key = res.get_vpn_auth_key().unwrap_or_else(|| auth_key.clone());
+                let control_url = res.get_vpn_control_url();
+                let provider = res.get_vpn_provider();
+                let bearer = res.bearer_token;
+                let reg_url = res.registry_url;
+                (res.node_id, vpn_key, control_url, provider, bearer, reg_url)
             }
             Err(e) => {
                 error!("❌ Goy Company API registration failed: {e}");
@@ -236,7 +236,7 @@ pub async fn run_onboard(
         }
     } else {
         info!("ℹ️ Skipping API registration (--vpn-only mode)");
-        (node_id, auth_key.clone(), None, None, None)
+        (node_id, auth_key.clone(), None, None, None, None)
     };
 
     // Determinar modo de VPN efetivo (Tailscale vs Headscale com fallback legacy)
@@ -398,21 +398,29 @@ pub async fn run_onboard(
         serde_json::to_string_pretty(&vpn_state)?,
     )?;
 
-    // Escrever config.toml se não existir ou atualizar mesh_url
+    // Escrever config.toml se não existir ou atualizar mesh_url / registry_url
 
     let config_content = if cfg_file_path.exists() {
-        let existing = fs::read_to_string(&cfg_file_path)?;
+        let mut existing = fs::read_to_string(&cfg_file_path)?;
         if !existing.contains("mesh_url") {
-            format!(
-                "{existing}\nmesh_url = \"{target_mesh_url}\"\nnode_id = \"{registered_node_id}\"\n"
-            )
-        } else {
-            existing
+            existing.push_str(&format!(
+                "\nmesh_url = \"{target_mesh_url}\"\nnode_id = \"{registered_node_id}\"\n"
+            ));
         }
+        if let Some(reg_url) = &registry_url_from_api
+            && !existing.contains("registry_url")
+        {
+            existing.push_str(&format!("registry_url = \"{reg_url}\"\n"));
+        }
+        existing
     } else {
-        format!(
+        let mut tpl = format!(
             "{DEFAULT_CONFIG_TEMPLATE}\nmesh_url = \"{target_mesh_url}\"\nnode_id = \"{registered_node_id}\"\n"
-        )
+        );
+        if let Some(reg_url) = &registry_url_from_api {
+            tpl.push_str(&format!("registry_url = \"{reg_url}\"\n"));
+        }
+        tpl
     };
 
     fs::write(&cfg_file_path, config_content)?;
