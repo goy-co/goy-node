@@ -74,6 +74,10 @@ pub struct Metrics {
     pub storage_reserved_bytes: AtomicU64,
     pub storage_available_bytes: AtomicU64,
     pub storage_used_bytes: AtomicU64,
+    /// Métricas de heartbeat enviadas ao registry central
+    pub heartbeat_total: AtomicU64,
+    pub heartbeat_failures_total: AtomicU64,
+    pub heartbeat_last_success_timestamp: AtomicU64,
     /// Instante de arranque do nó, para cálculo do gauge `goy_uptime_seconds`.
     pub started_at: Instant,
 }
@@ -103,8 +107,28 @@ impl Metrics {
             storage_reserved_bytes: AtomicU64::new(0),
             storage_available_bytes: AtomicU64::new(0),
             storage_used_bytes: AtomicU64::new(0),
+            heartbeat_total: AtomicU64::new(0),
+            heartbeat_failures_total: AtomicU64::new(0),
+            heartbeat_last_success_timestamp: AtomicU64::new(0),
             started_at: Instant::now(),
         }
+    }
+
+    /// Regista o sucesso de uma tentativa de heartbeat.
+    pub fn record_heartbeat_success(&self) {
+        self.heartbeat_total.fetch_add(1, Ordering::Relaxed);
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        self.heartbeat_last_success_timestamp
+            .store(now, Ordering::Relaxed);
+    }
+
+    /// Regista a falha de uma tentativa de heartbeat.
+    pub fn record_heartbeat_failure(&self) {
+        self.heartbeat_total.fetch_add(1, Ordering::Relaxed);
+        self.heartbeat_failures_total.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Atualiza as métricas de armazenamento com os valores (em bytes).
@@ -278,6 +302,24 @@ impl Metrics {
         s.push_str("# HELP goy_storage_used_bytes Space used by Goy Node in the data directory\n");
         s.push_str("# TYPE goy_storage_used_bytes gauge\n");
         s.push_str(&format!("goy_storage_used_bytes {storage_used}\n"));
+
+        // goy_node_heartbeat_total
+        let hb_total = self.heartbeat_total.load(Ordering::Relaxed);
+        s.push_str("# HELP goy_node_heartbeat_total Total heartbeat attempts sent to central registry.\n");
+        s.push_str("# TYPE goy_node_heartbeat_total counter\n");
+        s.push_str(&format!("goy_node_heartbeat_total {hb_total}\n"));
+
+        // goy_node_heartbeat_failures_total
+        let hb_failures = self.heartbeat_failures_total.load(Ordering::Relaxed);
+        s.push_str("# HELP goy_node_heartbeat_failures_total Total failed heartbeat attempts sent to central registry.\n");
+        s.push_str("# TYPE goy_node_heartbeat_failures_total counter\n");
+        s.push_str(&format!("goy_node_heartbeat_failures_total {hb_failures}\n"));
+
+        // goy_node_heartbeat_last_success_timestamp
+        let hb_last_success = self.heartbeat_last_success_timestamp.load(Ordering::Relaxed);
+        s.push_str("# HELP goy_node_heartbeat_last_success_timestamp Unix timestamp of the last successful heartbeat.\n");
+        s.push_str("# TYPE goy_node_heartbeat_last_success_timestamp gauge\n");
+        s.push_str(&format!("goy_node_heartbeat_last_success_timestamp {hb_last_success}\n"));
 
         // goy_uptime_seconds
         s.push_str("# HELP goy_uptime_seconds Seconds since the node process started.\n");

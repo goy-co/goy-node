@@ -667,11 +667,12 @@ pub async fn run_with_http_listen(
     relay_publish_tx: mpsc::Sender<String>,
     cancel: CancellationToken,
 ) -> anyhow::Result<()> {
-    run_with_http_listen_and_storage(
+    run_with_http_listen_and_storage_with_heartbeat(
         cfg,
         metrics_listen,
         relay_url,
         data_dir,
+        None,
         None,
         relay_events,
         relay_publish_tx,
@@ -680,7 +681,7 @@ pub async fn run_with_http_listen(
     .await
 }
 
-/// Inicia o mesh agent com suporte a servidor HTTP de métricas e estado de storage verificado.
+/// Inicia o mesh agent com suporte a servidor HTTP de métricas, estado de storage verificado e heartbeat config.
 #[allow(clippy::too_many_arguments)]
 pub async fn run_with_http_listen_and_storage(
     cfg: MeshConfig,
@@ -688,6 +689,33 @@ pub async fn run_with_http_listen_and_storage(
     relay_url: String,
     data_dir: Option<PathBuf>,
     storage_info: Option<crate::storage::StorageInfo>,
+    relay_events: broadcast::Receiver<RelayEvent>,
+    relay_publish_tx: mpsc::Sender<String>,
+    cancel: CancellationToken,
+) -> anyhow::Result<()> {
+    run_with_http_listen_and_storage_with_heartbeat(
+        cfg,
+        metrics_listen,
+        relay_url,
+        data_dir,
+        storage_info,
+        None,
+        relay_events,
+        relay_publish_tx,
+        cancel,
+    )
+    .await
+}
+
+/// Inicia o mesh agent com suporte completo a servidor HTTP de métricas, storage verificado e heartbeat config.
+#[allow(clippy::too_many_arguments)]
+pub async fn run_with_http_listen_and_storage_with_heartbeat(
+    cfg: MeshConfig,
+    metrics_listen: Option<String>,
+    relay_url: String,
+    data_dir: Option<PathBuf>,
+    storage_info: Option<crate::storage::StorageInfo>,
+    heartbeat_config: Option<crate::config::HeartbeatConfig>,
     mut relay_events: broadcast::Receiver<RelayEvent>,
     relay_publish_tx: mpsc::Sender<String>,
     cancel: CancellationToken,
@@ -931,58 +959,49 @@ pub async fn run_with_http_listen_and_storage(
             );
         }
 
-        // Task: Heartbeat periódico no registry (PUT /relays/{node_id}) + Deregisto no shutdown (DELETE)
-        let heartbeat_client = registry_client.clone();
-        let heartbeat_node_id = node_id.clone();
-        let cancel_heartbeat = cancel.clone();
-        let hb_interval_secs = cfg.heartbeat_secs;
-        let metrics_hb = metrics.clone();
+        // Task: HeartbeatService (PUT /v1/relays/{node_id})
+        let hb_cfg = heartbeat_config.unwrap_or_default();
+        if hb_cfg.enabled {
+            let onboard_state = crate::onboard::check_onboard_status(data_dir.as_deref());
+            if let Some(auth_key) = onboard_state.as_ref().and_then(|st| st.bearer_token.clone()) {
+                let mesh_url_hb = mesh_url.clone();
+                let cert_fp_hb = cert_fingerprint.clone();
+                let metrics_hb = metrics.clone();
 
-        tokio::spawn(async move {
-            let mut interval = tokio::time::interval(Duration::from_secs(hb_interval_secs));
-            interval.tick().await; // ignora o primeiro tick imediato
-
-            let mut last_logged_avail_gb: Option<u64> = None;
-            let mut last_log_time = std::time::Instant::now();
-
-            loop {
-                tokio::select! {
-                    _ = cancel_heartbeat.cancelled() => break,
-                    _ = interval.tick() => {
+                let hb_service = crate::heartbeat::HeartbeatService::new(
+                    hb_cfg,
+                    registry_url.clone(),
+                    reqwest::Client::builder()
+                        .timeout(Duration::from_secs(10))
+                        .build()
+                        .unwrap_or_default(),
+                    node_id.clone(),
+                    auth_key,
+                    Arc::new(move || mesh_url_hb.clone()),
+                    Arc::new(move || cert_fp_hb.clone()),
+                    Arc::new(move || {
                         let res_b = metrics_hb.storage_reserved_bytes.load(std::sync::atomic::Ordering::Relaxed);
                         let avail_b = metrics_hb.storage_available_bytes.load(std::sync::atomic::Ordering::Relaxed);
-                        let storage_meta = if res_b > 0 || avail_b > 0 {
-                            Some(registry::StorageMetadata::from_bytes(res_b, avail_b))
-                        } else {
-                            None
-                        };
-
-                        if let Err(e) = heartbeat_client.heartbeat(&heartbeat_node_id, storage_meta.clone()).await {
-                            warn!("⚠️ Registry heartbeat failed: {e}");
-                        } else if let Some(ref st) = storage_meta {
-                            let should_log = match last_logged_avail_gb {
-                                None => true,
-                                Some(prev) => {
-                                    let diff = (st.available_gb as i64 - prev as i64).unsigned_abs();
-                                    let ten_percent = prev / 10;
-                                    diff > ten_percent || last_log_time.elapsed() >= Duration::from_secs(600)
-                                }
-                            };
-                            if should_log {
-                                info!(
-                                    "💓 Registry heartbeat sent for {} (storage: {} GB available / {} GB reserved)",
-                                    heartbeat_node_id, st.available_gb, st.reserved_gb
-                                );
-                                last_logged_avail_gb = Some(st.available_gb);
-                                last_log_time = std::time::Instant::now();
-                            }
-                        }
-                    }
-                }
+                        (res_b / (1024 * 1024 * 1024), avail_b / (1024 * 1024 * 1024))
+                    }),
+                    metrics.clone(),
+                    cancel.clone(),
+                );
+                tokio::spawn(hb_service.run());
+            } else {
+                info!("ℹ️  Node not onboarded (no auth_key); skipping HeartbeatService");
             }
+        } else {
+            info!("ℹ️  Heartbeat service is disabled by configuration");
+        }
 
-            // Deregisto gracioso no shutdown
-            if let Err(e) = heartbeat_client.deregister(&heartbeat_node_id).await {
+        // Deregisto gracioso no shutdown (DELETE /relays/{node_id})
+        let dereg_client = registry_client.clone();
+        let dereg_node_id = node_id.clone();
+        let cancel_dereg = cancel.clone();
+        tokio::spawn(async move {
+            cancel_dereg.cancelled().await;
+            if let Err(e) = dereg_client.deregister(&dereg_node_id).await {
                 warn!("⚠️ Registry deregistration failed on shutdown: {e}");
             }
         });
@@ -994,6 +1013,7 @@ pub async fn run_with_http_listen_and_storage(
         let state_disc = state.clone();
         let cancel_disc = cancel.clone();
         let discovery_secs = cfg.discovery_secs;
+        let hb_interval_secs = cfg.heartbeat_secs;
         let data_dir_disc = data_dir.clone();
         let tls_disc = tls_ctx.clone();
 

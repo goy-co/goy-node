@@ -71,7 +71,7 @@ goy-node run
 - **mTLS 1.3 with Trust-On-First-Use (TOFU)**: End-to-end encrypted peer traffic with pinned fingerprints ([`docs/mesh-protocol.md`](docs/mesh-protocol.md)).
 - **Nostr Protocol NIP Support**: Full compliance with NIP-09 (Deletion), NIP-16/33 (Replaceable Events), NIP-40 (Expiration), and NIP-42.
 - **Integrated Onboarding**: Plug-and-play setup via `goy-node onboard` ([`docs/deployment-guide.md`](docs/deployment-guide.md)).
-- **Prometheus Observability & Admin CLI**: Built-in HTTP endpoints (`/metrics`, `/health`, `/peers`, `/info`) exposing `goy_storage_reserved_bytes`, `goy_storage_available_bytes`, and `goy_storage_used_bytes`.
+- **Prometheus Observability & Admin CLI**: Built-in HTTP endpoints (`/metrics`, `/health`, `/peers`, `/info`) exposing `goy_storage_reserved_bytes`, `goy_storage_available_bytes`, `goy_storage_used_bytes`, `goy_node_heartbeat_total`, `goy_node_heartbeat_failures_total`, and `goy_node_heartbeat_last_success_timestamp`.
 - **Reserved Storage Contract**: Hardcoded 50 GB minimum reserved storage per node for network redundancy, with voluntary extra contribution via `[storage]` configuration ([`docs/limits.md`](docs/limits.md)).
 - **Architectural Decision Records**: Deep dives into design trade-offs ([`docs/adr/`](docs/adr/)).
 
@@ -79,7 +79,7 @@ goy-node run
 
 ## ⚙️ Configuration (`config.toml`)
 
-Goy Node is configured via `/etc/goy-node/config.toml` (or environment variables). A minimal configuration with reserved storage:
+Goy Node is configured via `/etc/goy-node/config.toml` (or environment variables). A minimal configuration with reserved storage and periodic central registry heartbeat:
 
 ```toml
 [relay]
@@ -93,9 +93,16 @@ listen = "0.0.0.0:8443"
 # Voluntary extra contribution in GB:
 extra_contribution_gb = 50
 data_dir = "/var/lib/goy-node"
+
+[heartbeat]
+# Periodic heartbeat to central registry (default: true, interval: 60s)
+enabled = true
+interval_secs = 60
 ```
 
-Environment variable overrides: `GOY_NODE_EXTRA_STORAGE_GB` and `GOY_NODE_DATA_DIR`.
+Environment variable overrides: `GOY_NODE_EXTRA_STORAGE_GB`, `GOY_NODE_DATA_DIR`, `GOY_NODE_HEARTBEAT_ENABLED`, and `GOY_NODE_HEARTBEAT_INTERVAL_SECS`.
+
+> **Note:** If `registry_url` is not set in `[mesh]`, the heartbeat service is automatically skipped.
 
 ---
 

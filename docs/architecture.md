@@ -82,5 +82,6 @@ Stage 7: Consistent Hash Replication (Select N distinct peers on ring & forward)
 3. **`src/tls.rs`**: Self-signed ECDSA P-256 certificate generation, mTLS 1.3 server/client rustls config, and TOFU fingerprint persistence.
 4. **`src/rate_limiter.rs`**: Per-peer token-bucket rate limiter enforcing event rate and bandwidth caps.
 5. **`src/onboard.rs` & `src/goy_api.rs`**: Goy Company API client and Tailscale/Headscale VPN CLI integration.
-6. **`src/http.rs` & `src/metrics.rs`**: Observability HTTP server exposing Prometheus metrics (`/metrics`), health status (`/health`), connected peers (`/peers`), and JSON node metadata (`/info`).
-7. **`src/cli.rs`**: Admin CLI subcommand handler (`run`, `status`, `peers`, `info`, `metrics`, `onboard`, `offboard`).
+6. **`src/heartbeat.rs`**: Periodic node heartbeat service (`PUT /v1/relays/{node_id}`) with dynamic payload construction, exponential backoff retries, and Prometheus metrics recording.
+7. **`src/http.rs` & `src/metrics.rs`**: Observability HTTP server exposing Prometheus metrics (`/metrics`), health status (`/health`), connected peers (`/peers`), and JSON node metadata (`/info`).
+8. **`src/cli.rs`**: Admin CLI subcommand handler (`run`, `status`, `peers`, `info`, `metrics`, `onboard`, `offboard`).

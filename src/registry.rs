@@ -100,6 +100,7 @@ impl RegistryClient {
     }
 
     /// Heartbeat no registry: `PUT /relays/{node_id}`
+    #[allow(dead_code)]
     pub async fn heartbeat(
         &self,
         node_id: &str,

@@ -3,6 +3,7 @@ pub mod config;
 pub mod consistent_hash;
 pub mod event_types;
 pub mod goy_api;
+pub mod heartbeat;
 pub mod http;
 pub mod mesh;
 pub mod metrics;

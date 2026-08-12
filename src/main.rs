@@ -17,6 +17,7 @@ mod config;
 mod consistent_hash;
 mod event_types;
 mod goy_api;
+mod heartbeat;
 mod http;
 mod mesh;
 mod metrics;
@@ -176,12 +177,13 @@ async fn cmd_run(
     info!("✔ Relay connection started");
 
     // ── Mesh Agent ─────────────────────────────────────────────────────
-    let mesh_handle = tokio::spawn(mesh::run_with_http_listen_and_storage(
+    let mesh_handle = tokio::spawn(mesh::run_with_http_listen_and_storage_with_heartbeat(
         cfg.mesh,
         cfg.metrics.listen,
         cfg.relay.url.clone(),
         Some(data_dir),
         Some(storage_info),
+        Some(cfg.heartbeat),
         relay_events,
         relay_publisher,
         cancel.clone(),

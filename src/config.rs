@@ -52,6 +52,13 @@ extra_contribution_gb = 0
 # Endereço e porta onde o servidor HTTP de observabilidade escuta (apenas localhost).
 # Definir como "" ou "off" para desativar.
 listen = "127.0.0.1:9090"
+
+[heartbeat]
+# Ativa o envio de heartbeat ao registry central (default: true)
+enabled = true
+
+# Intervalo em segundos entre envios de heartbeat (default: 60s)
+interval_secs = 60
 "#;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -62,6 +69,8 @@ pub struct Config {
     pub metrics: MetricsConfig,
     #[serde(default)]
     pub storage: StorageConfig,
+    #[serde(default)]
+    pub heartbeat: HeartbeatConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -121,6 +130,33 @@ pub struct MetricsConfig {
     /// `None` desativa o servidor HTTP.
     #[serde(default = "default_metrics_listen")]
     pub listen: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HeartbeatConfig {
+    /// Ativa o envio periódico de heartbeat ao registry central (default: true)
+    #[serde(default = "default_heartbeat_enabled")]
+    pub enabled: bool,
+    /// Intervalo em segundos entre envios de heartbeat (default: 60s)
+    #[serde(default = "default_heartbeat_interval_secs")]
+    pub interval_secs: u64,
+}
+
+fn default_heartbeat_enabled() -> bool {
+    true
+}
+
+fn default_heartbeat_interval_secs() -> u64 {
+    60
+}
+
+impl Default for HeartbeatConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_heartbeat_enabled(),
+            interval_secs: default_heartbeat_interval_secs(),
+        }
+    }
 }
 
 fn default_vnodes_per_peer() -> u32 {
@@ -345,6 +381,22 @@ impl Config {
                 self.storage.data_dir = new_dir;
             }
         }
+
+        if let Ok(v_raw) = std::env::var("GOY_NODE_HEARTBEAT_ENABLED") {
+            let enabled = matches!(
+                v_raw.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            );
+            info!("🔧 Override from env GOY_NODE_HEARTBEAT_ENABLED: {enabled}");
+            self.heartbeat.enabled = enabled;
+        }
+
+        if let Ok(secs_raw) = std::env::var("GOY_NODE_HEARTBEAT_INTERVAL_SECS")
+            && let Ok(secs) = secs_raw.parse::<u64>()
+        {
+            info!("🔧 Override from env GOY_NODE_HEARTBEAT_INTERVAL_SECS: {secs}");
+            self.heartbeat.interval_secs = secs;
+        }
     }
 
     /// Valida rigorosamente todos os campos da configuração.
@@ -437,6 +489,14 @@ impl Config {
             self.storage.data_dir = abs_path;
         }
 
+        // 9. Valida heartbeat.interval_secs
+        if self.heartbeat.interval_secs == 0 {
+            warn!(
+                "⚠️  heartbeat.interval_secs é 0 (inválido). A utilizar valor default (60s)"
+            );
+            self.heartbeat.interval_secs = 60;
+        }
+
         Ok(())
     }
 }
@@ -472,6 +532,7 @@ impl Default for Config {
             mesh: MeshConfig::default(),
             metrics: MetricsConfig::default(),
             storage: StorageConfig::default(),
+            heartbeat: HeartbeatConfig::default(),
         }
     }
 }
@@ -784,5 +845,44 @@ data_dir = "/var/lib/custom-goy"
         assert!(cfg.storage.data_dir.is_absolute());
         assert!(cfg.storage.data_dir.ends_with("my_relative_data"));
         Ok(())
+    }
+
+    #[test]
+    fn test_heartbeat_config_defaults_and_zero_interval_validation() -> anyhow::Result<()> {
+        let toml_str = r#"
+[relay]
+url = "ws://127.0.0.1:7777"
+
+[mesh]
+listen = "0.0.0.0:8443"
+
+[heartbeat]
+enabled = true
+interval_secs = 0
+"#;
+        let cfg = Config::load_from_str(toml_str)?;
+        assert_eq!(cfg.heartbeat.interval_secs, 60);
+        assert!(cfg.heartbeat.enabled);
+        Ok(())
+    }
+
+    #[test]
+    fn test_heartbeat_env_overrides() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        unsafe {
+            std::env::set_var("GOY_NODE_HEARTBEAT_ENABLED", "false");
+            std::env::set_var("GOY_NODE_HEARTBEAT_INTERVAL_SECS", "120");
+        }
+
+        let mut cfg = Config::default();
+        cfg.apply_env_overrides();
+
+        assert!(!cfg.heartbeat.enabled);
+        assert_eq!(cfg.heartbeat.interval_secs, 120);
+
+        unsafe {
+            std::env::remove_var("GOY_NODE_HEARTBEAT_ENABLED");
+            std::env::remove_var("GOY_NODE_HEARTBEAT_INTERVAL_SECS");
+        }
     }
 }
