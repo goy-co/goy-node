@@ -358,6 +358,34 @@ pub async fn run_onboard(
         }
     };
 
+    // 5. Anunciar relay no registry do coord-server
+    if let Some(ref reg_url) = registry_url_from_api {
+        info!("📢 Announcing relay to registry at {reg_url}...");
+        let registry_client = GoyApiClient::new(Some(reg_url));
+
+        let storage_reserved = crate::storage::MIN_RESERVED_GB + extra_contribution_gb;
+        let storage_available = match crate::storage::verify_storage(&storage_cfg) {
+            Ok(info) => info.available_gb,
+            Err(_) => 0,
+        };
+
+        if let Err(e) = registry_client
+            .announce_relay(
+                &auth_key,
+                &registered_node_id,
+                &target_mesh_url,
+                Some("sha256:pending"),
+                storage_reserved,
+                storage_available,
+            )
+            .await
+        {
+            warn!("⚠️ Failed to announce relay to registry: {e}");
+        }
+    } else {
+        warn!("⚠️ No registry URL available, skipping relay announce");
+    }
+
     // Gravar node_id.txt
     fs::write(target_data_dir.join("node_id.txt"), &registered_node_id)?;
 

@@ -194,6 +194,62 @@ impl GoyApiClient {
 
         Ok(())
     }
+
+    /// Anunciar o nó como um relay ativo no registry do coord-server (POST /relays).
+    pub async fn announce_relay(
+        &self,
+        auth_key: &str,
+        node_id: &str,
+        url: &str,
+        fingerprint: Option<&str>,
+        reserved_gb: u64,
+        available_gb: u64,
+    ) -> anyhow::Result<()> {
+        if std::env::var("GOY_API_MOCK").is_ok() || self.base_url.contains("mock.local") {
+            info!("⚙️ Goy API Mock mode active for relay announce");
+            return Ok(());
+        }
+
+        let bearer_key = std::env::var("GOY_ADMIN_API_KEY")
+            .ok()
+            .filter(|k| !k.trim().is_empty())
+            .unwrap_or_else(|| auth_key.to_string());
+
+        let endpoint = format!("{}/relays", self.base_url);
+        let fingerprint_str = fingerprint.unwrap_or("sha256:pending");
+
+        let payload = serde_json::json!({
+            "node_id": node_id,
+            "url": url,
+            "fingerprint": fingerprint_str,
+            "storage": {
+                "reserved_gb": reserved_gb,
+                "available_gb": available_gb
+            },
+            "replication_factor": 3,
+            "version": env!("CARGO_PKG_VERSION"),
+            "capabilities": ["nip09"]
+        });
+
+        info!("📢 Announcing relay to registry at {endpoint}...");
+        let resp = self
+            .http
+            .post(&endpoint)
+            .bearer_auth(bearer_key)
+            .json(&payload)
+            .send()
+            .await?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let err_text = resp.text().await.unwrap_or_default();
+            warn!("⚠️ Relay announce returned status {status}: {err_text}");
+        } else {
+            info!("✅ Relay announced successfully to registry!");
+        }
+
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -313,5 +369,21 @@ mod tests {
         unsafe {
             std::env::remove_var("GOY_ADMIN_API_KEY");
         }
+    }
+
+    #[tokio::test]
+    async fn test_announce_relay_mock() {
+        let client = GoyApiClient::new(Some("http://mock.local"));
+        let res = client
+            .announce_relay(
+                "gc_test_key_12345",
+                "node-test-1",
+                "ws://127.0.0.1:8443",
+                Some("sha256:pending"),
+                50,
+                100,
+            )
+            .await;
+        assert!(res.is_ok());
     }
 }
