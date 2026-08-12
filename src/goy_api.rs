@@ -2,6 +2,7 @@
 
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::time::Duration;
 use tracing::{info, warn};
 
@@ -216,7 +217,13 @@ impl GoyApiClient {
             .unwrap_or_else(|| auth_key.to_string());
 
         let endpoint = format!("{}/relays", self.base_url);
-        let fingerprint_str = fingerprint.unwrap_or("sha256:pending");
+        let fingerprint_str = match fingerprint {
+            Some(fp) if fp.starts_with("sha256:") && fp.len() == 71 => fp.to_string(),
+            _ => {
+                let hash = format!("{:x}", Sha256::digest(node_id.as_bytes()));
+                format!("sha256:{hash}")
+            }
+        };
 
         let payload = serde_json::json!({
             "node_id": node_id,
