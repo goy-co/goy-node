@@ -483,3 +483,71 @@ fn default_goy_node_config() -> GoyNodeConfig {
         },
     }
 }
+
+/// Executa o subcomando `config migrate`.
+pub fn cmd_migrate(non_interactive: bool, target_path: Option<&Path>) -> Result<()> {
+    println!("🔍 Scanning environment variables...\n");
+
+    let found = super::resolver::scan_deprecated_env_vars();
+
+    if found.is_empty() {
+        println!("✅ No deprecated env vars found. Nothing to migrate.");
+        return Ok(());
+    }
+
+    println!("Found {} deprecated env var(s):", found.len());
+    for (env_var, _field, value) in &found {
+        println!("  • {env_var} = {}", mask_secret(value));
+    }
+    println!();
+
+    let config_path = target_path
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(default_config_path);
+
+    // Confirmar se não for non_interactive
+    if !non_interactive {
+        let confirm = dialoguer::Confirm::new()
+            .with_prompt(format!(
+                "Write these values to {}?",
+                config_path.display()
+            ))
+            .default(true)
+            .interact()?;
+
+        if !confirm {
+            println!("Aborted.");
+            return Ok(());
+        }
+    }
+
+    // Carregar ou criar config
+    let mut config = if config_path.exists() {
+        let content = std::fs::read_to_string(&config_path)?;
+        toml::from_str(&content)?
+    } else {
+        default_goy_node_config()
+    };
+
+    // Aplicar valores das env vars
+    let mut migrated = Vec::new();
+    for (env_var, field, value) in &found {
+        super::resolver::apply_env_value(&mut config, env_var, value);
+        migrated.push((*field, mask_secret(value)));
+    }
+
+    // Validar
+    config.validate()?;
+
+    // Escrever
+    write_config_auto(&config_path, &config)?;
+
+    println!("\n✅ Migrated:");
+    for (field, masked_value) in &migrated {
+        println!("  • {field} = \"{masked_value}\"");
+    }
+    println!("\n💾 Configuration saved to {}", config_path.display());
+    println!("\n🎉 Migration complete! You can now remove these env vars from your shell/environment.");
+
+    Ok(())
+}

@@ -82,27 +82,61 @@ goy-node run
 Goy Node is configured via `/etc/goy-node/config.toml` (or environment variables). A minimal configuration with reserved storage and periodic central registry heartbeat:
 
 ```toml
+[coord]
+url = "http://localhost:8080"
+admin_api_key = "your_admin_api_key"
+heartbeat_interval_secs = 30
+
 [relay]
 url = "ws://127.0.0.1:7777"
 
 [mesh]
 listen = "0.0.0.0:8443"
+seeds = []
+tls_enabled = true
 
 [storage]
-# Minimum mandatory reserved storage is 50 GB (hardcoded).
-# Voluntary extra contribution in GB:
-extra_contribution_gb = 50
 data_dir = "/var/lib/goy-node"
+extra_contribution_gb = 50
 
-[heartbeat]
-# Periodic heartbeat to central registry (default: true, interval: 60s)
-enabled = true
-interval_secs = 60
+[metrics]
+listen = "127.0.0.1:9090"
+
+[log]
+level = "info"
+format = "pretty"
 ```
 
-Environment variable overrides: `GOY_NODE_EXTRA_STORAGE_GB`, `GOY_NODE_DATA_DIR`, `GOY_NODE_HEARTBEAT_ENABLED`, and `GOY_NODE_HEARTBEAT_INTERVAL_SECS`.
+---
 
-> **Note:** If `registry_url` is not set in `[mesh]`, the heartbeat service is automatically skipped.
+## 🔄 Migrating from Environment Variables (v0.1.x → v0.2.0)
+
+Goy Node v0.2.0 introduces file-based configuration (`~/.config/goy-node/config.toml`). Environment variables are still supported but **deprecated** and will be removed in **v0.3.0**.
+
+### Quick Migration
+
+```bash
+# Automatic migration from active environment variables
+goy-node config migrate
+
+# Non-interactive migration (e.g. CI / deployment scripts)
+goy-node config migrate --yes
+```
+
+### Deprecated Environment Variables
+
+| Env Var | Replacement in `config.toml` | Alternative CLI Flag | Removal |
+|---|---|---|---|
+| `GOY_API_URL` | `[coord] url` | `--coord-url` | v0.3.0 |
+| `GOY_ADMIN_API_KEY` | `[coord] admin_api_key` | `--admin-api-key` | v0.3.0 |
+| `GOY_DATA_DIR` | `[storage] data_dir` | `--data-dir` | v0.3.0 |
+| `GOY_RELAY_URL` | `[relay] url` | *(none)* | v0.3.0 |
+| `GOY_MESH_LISTEN` | `[mesh] listen` | *(none)* | v0.3.0 |
+| `GOY_METRICS_LISTEN` | `[metrics] listen` | *(none)* | v0.3.0 |
+| `GOY_CONFIG_PATH` | *(canonical path)* | `--config` | v0.3.0 |
+| `RUST_LOG` | `[log] level` | `--log-level` | Soft-deprecated |
+
+See `goy-node config --help` for all available configuration commands.
 
 ---
 

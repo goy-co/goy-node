@@ -129,6 +129,16 @@ pub enum ConfigAction {
     Set(ConfigSetArgs),
     /// Ler um campo específico
     Get(ConfigGetArgs),
+    /// Migrar env vars deprecated para config.toml
+    Migrate(ConfigMigrateArgs),
+}
+
+/// Argumentos do subcomando `config migrate`
+#[derive(Parser, Debug, PartialEq, Eq, Clone, Default)]
+pub struct ConfigMigrateArgs {
+    /// Migrar sem confirmação interativa
+    #[arg(long, short = 'y')]
+    pub yes: bool,
 }
 
 /// Argumentos do subcomando `config init`

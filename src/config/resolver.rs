@@ -1,3 +1,4 @@
+use super::default_config_path;
 use super::schema::GoyNodeConfig;
 use anyhow::{bail, Result};
 use std::collections::HashMap;
@@ -119,11 +120,9 @@ pub fn resolve(opts: &ResolveOptions) -> Result<ResolvedConfig> {
         (cfg, true)
     };
 
-    // ── Passo 2: Env vars (deprecated) — só se NÃO foi auto-gerado ─────
+    // ── Passo 2: Env vars (deprecated) ────────────────────────────────
     let file_source = ConfigSource::ConfigFile(config_path.clone());
-    if !auto_generated {
-        apply_env_overrides(&mut config, &file_source, &mut sources, &mut warnings);
-    }
+    apply_env_overrides(&mut config, &file_source, &mut sources, &mut warnings);
 
     // ── Passo 3: CLI flags (sempre aplicadas) ──────────────────────────
     apply_cli_overrides(&mut config, opts, &mut sources);
@@ -224,16 +223,33 @@ fn mark_cli_sources(sources: &mut HashMap<String, ConfigSource>, opts: &ResolveO
     }
 }
 
-/// Mapeamento de env vars → campos do config.
-const ENV_VAR_MAPPINGS: &[(&str, &str)] = &[
-    ("GOY_API_URL", "coord.url"),
-    ("GOY_ADMIN_API_KEY", "coord.admin_api_key"),
-    ("GOY_DATA_DIR", "storage.data_dir"),
-    ("GOY_RELAY_URL", "relay.url"),
-    ("GOY_MESH_LISTEN", "mesh.listen"),
-    ("GOY_METRICS_LISTEN", "metrics.listen"),
-    ("RUST_LOG", "log.level"),
+/// Mapeamento de env vars → (campo do config, flag CLI alternativa)
+pub const ENV_VAR_DEPRECATIONS: &[(&str, &str, &str)] = &[
+    ("GOY_API_URL", "coord.url", "--coord-url"),
+    ("GOY_ADMIN_API_KEY", "coord.admin_api_key", "--admin-api-key"),
+    ("GOY_DATA_DIR", "storage.data_dir", "--data-dir"),
+    ("GOY_RELAY_URL", "relay.url", "(none)"),
+    ("GOY_MESH_LISTEN", "mesh.listen", "(none)"),
+    ("GOY_METRICS_LISTEN", "metrics.listen", "(none)"),
+    ("GOY_CONFIG_PATH", "(path)", "--config"),
+    ("RUST_LOG", "log.level", "--log-level"),
 ];
+
+/// Faz o scan de variáveis de ambiente deprecated presentes no processo.
+pub fn scan_deprecated_env_vars() -> Vec<(&'static str, &'static str, String)> {
+    let mut found = Vec::new();
+    for (env_var, config_field, _cli_flag) in ENV_VAR_DEPRECATIONS {
+        if *config_field == "(path)" {
+            continue;
+        }
+        if let Ok(value) = std::env::var(env_var) {
+            if !value.trim().is_empty() {
+                found.push((*env_var, *config_field, value));
+            }
+        }
+    }
+    found
+}
 
 fn apply_env_overrides(
     config: &mut GoyNodeConfig,
@@ -241,34 +257,47 @@ fn apply_env_overrides(
     sources: &mut HashMap<String, ConfigSource>,
     warnings: &mut Vec<String>,
 ) {
-    for (env_var, field) in ENV_VAR_MAPPINGS {
+    let config_path = default_config_path();
+    for (env_var, config_field, cli_flag) in ENV_VAR_DEPRECATIONS {
+        if *config_field == "(path)" {
+            continue;
+        }
         if let Ok(value) = std::env::var(env_var) {
             if value.trim().is_empty() {
                 continue;
             }
 
-            // Warning de deprecation
+            let masked = mask_secret(&value);
+            let section = config_field.split('.').next().unwrap_or("");
+            let key = config_field.split('.').nth(1).unwrap_or("");
+
             let warning = format!(
-                "⚠️  {} is deprecated. Use [{}] in config.toml or the corresponding CLI flag.",
-                env_var,
-                field.split('.').next().unwrap_or(field)
+                "⚠️  DEPRECATED: {env_var}={masked}\n\
+                 \x20  This env var will be removed in v0.3.0.\n\
+                 \x20  Migrate now:  goy-node config set {config_field} \"{value}\"\n\
+                 \x20  Or use flag:  {cli_flag} {value}\n\
+                 \x20  Or edit file: {} → [{section}] {key}",
+                config_path.display()
             );
             warn!("{}", warning);
             warnings.push(warning);
 
             // Só aplicar se o campo ainda tem valor default
             // (config.toml tem prioridade sobre env vars)
-            if !sources.contains_key(*field)
-                || matches!(sources.get(*field), Some(ConfigSource::Default))
+            if !sources.contains_key(*config_field)
+                || matches!(sources.get(*config_field), Some(ConfigSource::Default))
             {
                 apply_env_value(config, env_var, &value);
-                sources.insert(field.to_string(), ConfigSource::EnvVar(env_var.to_string()));
+                sources.insert(
+                    config_field.to_string(),
+                    ConfigSource::EnvVar(env_var.to_string()),
+                );
             }
         }
     }
 }
 
-fn apply_env_value(config: &mut GoyNodeConfig, env_var: &str, value: &str) {
+pub(crate) fn apply_env_value(config: &mut GoyNodeConfig, env_var: &str, value: &str) {
     match env_var {
         "GOY_API_URL" => config.coord.url = value.to_string(),
         "GOY_ADMIN_API_KEY" => config.coord.admin_api_key = value.to_string(),

@@ -4,6 +4,8 @@ mod tests {
     use crate::config::schema::*;
     use tempfile::TempDir;
 
+    static ENV_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     fn valid_test_config() -> GoyNodeConfig {
         GoyNodeConfig {
             coord: crate::config::schema::CoordConfig {
@@ -191,5 +193,48 @@ mod tests {
         let content = std::fs::read_to_string(&*config_path).unwrap();
         let parsed: Result<GoyNodeConfig, _> = toml::from_str(&content);
         assert!(parsed.is_ok());
+    }
+
+    #[test]
+    fn test_migrate_finds_and_converts_env_vars() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        let dir = TempDir::new().unwrap();
+        let config_path = dir.path().join("config.toml");
+
+        unsafe {
+            std::env::set_var("GOY_API_URL", "http://migrate-test:8080");
+            std::env::set_var("GOY_ADMIN_API_KEY", "migrate_key_12345");
+        }
+
+        let found = crate::config::resolver::scan_deprecated_env_vars();
+        assert!(found.len() >= 2);
+        assert!(found.iter().any(|(ev, _, _)| *ev == "GOY_API_URL"));
+        assert!(found.iter().any(|(ev, _, _)| *ev == "GOY_ADMIN_API_KEY"));
+
+        // Executar cmd_migrate não-interativo
+        let res = cmd_migrate(true, Some(&config_path));
+        assert!(res.is_ok());
+
+        let disk_content = std::fs::read_to_string(&config_path).unwrap();
+        assert!(disk_content.contains("http://migrate-test:8080"));
+        assert!(disk_content.contains("migrate_key_12345"));
+
+        unsafe {
+            std::env::remove_var("GOY_API_URL");
+            std::env::remove_var("GOY_ADMIN_API_KEY");
+        }
+    }
+
+    #[test]
+    fn test_migrate_no_env_vars_found() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        for (ev, _, _) in crate::config::resolver::ENV_VAR_DEPRECATIONS {
+            unsafe {
+                std::env::remove_var(ev);
+            }
+        }
+
+        let found = crate::config::resolver::scan_deprecated_env_vars();
+        assert!(found.is_empty());
     }
 }

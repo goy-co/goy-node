@@ -65,6 +65,11 @@ async fn main() -> anyhow::Result<()> {
                 config::commands::cmd_get(&cmd_args, cli.config.as_deref())?;
                 return Ok(());
             }
+            cli::ConfigAction::Migrate(migrate_args) => {
+                let non_interactive = migrate_args.yes || cli.no_interactive;
+                config::commands::cmd_migrate(non_interactive, cli.config.as_deref())?;
+                return Ok(());
+            }
             _ => {}
         }
     }

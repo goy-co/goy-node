@@ -380,3 +380,30 @@ fn test_config_init_force_overwrites() {
     assert!(content.contains("http://new:8080"));
     assert!(!content.contains("old content"));
 }
+
+#[test]
+fn test_config_migrate_command() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let config_path = dir.path().join("config.toml");
+
+    Command::cargo_bin("goy-node")
+        .unwrap()
+        .args([
+            "--config",
+            config_path.to_str().unwrap(),
+            "config",
+            "migrate",
+            "--yes",
+        ])
+        .env("GOY_API_URL", "http://migrate:8080")
+        .env("GOY_ADMIN_API_KEY", "migrate_key_12345")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Migrated"))
+        .stdout(predicate::str::contains("coord.url"));
+
+    // Verificar que config foi criado com valores migrados
+    let content = std::fs::read_to_string(&config_path).unwrap();
+    assert!(content.contains("http://migrate:8080"));
+    assert!(content.contains("migrate_key_12345"));
+}

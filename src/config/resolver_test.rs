@@ -78,7 +78,7 @@ mod tests {
         let resolved = resolve(&opts).unwrap();
         // Config file ganha sobre env var
         assert_eq!(resolved.config.coord.url, "http://from-file:8080");
-        assert!(resolved.warnings.iter().any(|w| w.contains("deprecated")));
+        assert!(resolved.warnings.iter().any(|w| w.to_lowercase().contains("deprecated")));
 
         unsafe {
             std::env::remove_var("GOY_API_URL");
@@ -281,7 +281,7 @@ mod tests {
         );
 
         // Mas warning de deprecation foi emitido
-        assert!(resolved.warnings.iter().any(|w| w.contains("deprecated")));
+        assert!(resolved.warnings.iter().any(|w| w.to_lowercase().contains("deprecated")));
 
         unsafe {
             std::env::remove_var("GOY_API_URL");
@@ -421,5 +421,39 @@ mod tests {
             "resolve() took too long: {:?}",
             duration
         );
+    }
+
+    #[test]
+    fn test_deprecation_warning_contains_migration_instructions() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        let dir = TempDir::new().unwrap();
+        let config_path = dir.path().join("config.toml");
+
+        unsafe {
+            std::env::set_var("GOY_API_URL", "http://warn-test:8080");
+        }
+
+        let opts = ResolveOptions {
+            config_path: Some(config_path),
+            no_interactive: true,
+            coord_url: Some("http://override:8080".to_string()),
+            admin_api_key: Some("key".to_string()),
+            ..Default::default()
+        };
+
+        let resolved = resolve(&opts).unwrap();
+        let warning = resolved
+            .warnings
+            .iter()
+            .find(|w| w.contains("GOY_API_URL"))
+            .expect("should have deprecation warning");
+
+        assert!(warning.contains("v0.3.0"));
+        assert!(warning.contains("config set"));
+        assert!(warning.contains("--coord-url"));
+
+        unsafe {
+            std::env::remove_var("GOY_API_URL");
+        }
     }
 }
