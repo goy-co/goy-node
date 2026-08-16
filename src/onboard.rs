@@ -296,6 +296,7 @@ pub async fn run_onboard(
         let mut cmd = Command::new("tailscale");
         cmd.arg("up")
             .arg("--reset")
+            .arg("--timeout=2s")
             .arg(format!("--authkey={vpn_key_to_use}"))
             .arg("--accept-routes");
 

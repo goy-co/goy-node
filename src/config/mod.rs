@@ -1,3 +1,12 @@
+pub mod compat;
+pub mod schema;
+pub mod validation;
+
+#[cfg(test)]
+mod schema_test;
+
+pub use schema::GoyNodeConfig;
+
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 
@@ -6,60 +15,37 @@ use tracing::{info, warn};
 
 use crate::storage::StorageConfig;
 
-pub const DEFAULT_CONFIG_TEMPLATE: &str = r#"# =====================================================================
-# Goy Node Configuration
-# =====================================================================
+/// Path canónico do config.toml
+pub fn default_config_path() -> PathBuf {
+    dirs::config_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("goy-node")
+        .join("config.toml")
+}
 
-[relay]
-# WebSocket URL do relay Nostr local (ex: strfry)
-url = "ws://127.0.0.1:7777"
+/// Carrega config do path especificado ou do path canónico.
+pub fn load_config(path: Option<&Path>) -> anyhow::Result<GoyNodeConfig> {
+    let config_path = path
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(default_config_path);
 
-# Comando opcional para importação em massa (opcional)
-# import_cmd = "strfry import"
+    if !config_path.exists() {
+        anyhow::bail!(
+            "Config file not found at {}. Run 'goy-node config init' to create one.",
+            config_path.display()
+        );
+    }
 
-[mesh]
-# Endereço e porta onde o mesh agent escuta conexões inbound de peers
-listen = "0.0.0.0:8443"
+    let content = std::fs::read_to_string(&config_path)?;
+    let config: GoyNodeConfig = toml::from_str(&content)
+        .map_err(|e| anyhow::anyhow!("Failed to parse config at {}: {e}", config_path.display()))?;
 
-# Lista de nós seeds conhecidos para bootstrap (ex: ["ws://peer1:8443", "ws://peer2:8443"])
-seeds = []
+    config.validate()?;
 
-# URL do registry central de nó (opcional)
-# registry_url = "https://registry.goy.company"
+    Ok(config)
+}
 
-# Intervalo entre mensagens keepalive/heartbeat em segundos (default: 30s)
-heartbeat_secs = 30
-
-# TLS mútuo entre peers (default: true). Desativar apenas para testes locais.
-tls_enabled = true
-
-# Fingerprints SHA-256 pré-aprovados (têm prioridade sobre trust-on-first-use)
-# [mesh.trusted_fingerprints]
-# "ws://peer1:8443" = "a1b2c3..."
-
-[storage]
-# Diretório de dados do nó onde residem chaves, certificados e estado persistente.
-data_dir = "/var/lib/goy-node"
-
-# Espaço de armazenamento adicional voluntário em GB acima do mínimo obrigatório (50 GB hardcoded).
-# O nó reserva automaticamente um mínimo obrigatório de 50 GB para garantir redundância no mesh.
-# Exemplos de contribuição voluntária:
-#   - Operador individual / nó doméstico: 0 a 50 GB extra
-#   - Organização / servidor dedicado:   100 a 200 GB extra
-extra_contribution_gb = 0
-
-[metrics]
-# Endereço e porta onde o servidor HTTP de observabilidade escuta (apenas localhost).
-# Definir como "" ou "off" para desativar.
-listen = "127.0.0.1:9090"
-
-[heartbeat]
-# Ativa o envio de heartbeat ao registry central (default: true)
-enabled = true
-
-# Intervalo em segundos entre envios de heartbeat (default: 60s)
-interval_secs = 60
-"#;
+pub const DEFAULT_CONFIG_TEMPLATE: &str = include_str!("default_config.toml");
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
