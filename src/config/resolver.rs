@@ -89,6 +89,21 @@ pub fn resolve(opts: &ResolveOptions) -> Result<ResolvedConfig> {
             )
         })?;
         info!("📄 Loaded config from {}", config_path.display());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if let Ok(meta) = std::fs::metadata(&config_path) {
+                let mode = meta.permissions().mode() & 0o777;
+                if mode & 0o044 != 0 {
+                    warnings.push(format!(
+                        "⚠️  Config file {} has insecure permissions ({:03o}). Contains secrets — should be 0600. Fix: chmod 600 {}",
+                        config_path.display(),
+                        mode,
+                        config_path.display()
+                    ));
+                }
+            }
+        }
         let src = ConfigSource::ConfigFile(config_path.clone());
         mark_all_fields_as_source(&mut sources, src);
         (cfg, false)

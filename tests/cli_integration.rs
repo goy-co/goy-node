@@ -351,3 +351,32 @@ fn test_piped_input_fails_gracefully() {
         .failure()
         .stderr(predicate::str::contains("not a terminal"));
 }
+
+#[test]
+fn test_config_init_force_overwrites() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let config_path = dir.path().join("config.toml");
+    std::fs::write(&config_path, "old content").unwrap();
+
+    Command::cargo_bin("goy-node")
+        .unwrap()
+        .args([
+            "--config",
+            config_path.to_str().unwrap(),
+            "config",
+            "init",
+            "--coord-url",
+            "http://new:8080",
+            "--admin-api-key",
+            "new_key_12345",
+            "--non-interactive",
+            "--force",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("saved"));
+
+    let content = std::fs::read_to_string(&config_path).unwrap();
+    assert!(content.contains("http://new:8080"));
+    assert!(!content.contains("old content"));
+}

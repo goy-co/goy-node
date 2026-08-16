@@ -1,6 +1,7 @@
 #[cfg(test)]
 mod tests {
     use crate::config::resolver::*;
+    use crate::config::schema::GoyNodeConfig;
     use tempfile::TempDir;
 
     static ENV_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -234,5 +235,150 @@ mod tests {
             let perms = std::fs::metadata(&config_path).unwrap().permissions();
             assert_eq!(perms.mode() & 0o777, 0o600);
         }
+    }
+
+    #[test]
+    fn test_env_var_ignored_when_config_has_value() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        let dir = TempDir::new().unwrap();
+        let config_path = dir.path().join("config.toml");
+        std::fs::write(
+            &config_path,
+            r#"
+            [coord]
+            url = "http://from-config:8080"
+            admin_api_key = "config_key"
+            [relay]
+            url = "ws://127.0.0.1:7777"
+            [mesh]
+            listen = "0.0.0.0:8443"
+            [storage]
+            data_dir = "/var/lib/goy-node"
+            [metrics]
+            listen = "127.0.0.1:9090"
+        "#,
+        )
+        .unwrap();
+
+        // Definir env var diferente
+        unsafe {
+            std::env::set_var("GOY_API_URL", "http://from-env:9999");
+        }
+
+        let opts = ResolveOptions {
+            config_path: Some(config_path.clone()),
+            no_interactive: true,
+            ..Default::default()
+        };
+
+        let resolved = resolve(&opts).unwrap();
+
+        // Config file ganha — env var é ignorada
+        assert_eq!(resolved.config.coord.url, "http://from-config:8080");
+        assert_eq!(
+            resolved.sources.get("coord.url"),
+            Some(&ConfigSource::ConfigFile(config_path))
+        );
+
+        // Mas warning de deprecation foi emitido
+        assert!(resolved.warnings.iter().any(|w| w.contains("deprecated")));
+
+        unsafe {
+            std::env::remove_var("GOY_API_URL");
+        }
+    }
+
+    #[test]
+    fn test_resolve_after_set_reads_updated_value() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        let dir = TempDir::new().unwrap();
+        let config_path = dir.path().join("config.toml");
+
+        // Criar config inicial
+        let opts = ResolveOptions {
+            config_path: Some(config_path.clone()),
+            coord_url: Some("http://initial:8080".to_string()),
+            admin_api_key: Some("test_key".to_string()),
+            no_interactive: true,
+            ..Default::default()
+        };
+        resolve(&opts).unwrap();
+
+        // Modificar via set
+        let mut config: GoyNodeConfig =
+            toml::from_str(&std::fs::read_to_string(&config_path).unwrap()).unwrap();
+        crate::config::commands::apply_set_field(&mut config, "coord.url", "http://updated:9090")
+            .unwrap();
+        crate::config::commands::write_config_auto(&config_path, &config).unwrap();
+
+        // Resolver novamente — deve ler valor atualizado
+        let opts2 = ResolveOptions {
+            config_path: Some(config_path),
+            no_interactive: true,
+            ..Default::default()
+        };
+        let resolved = resolve(&opts2).unwrap();
+        assert_eq!(resolved.config.coord.url, "http://updated:9090");
+    }
+
+    #[test]
+    fn test_corrupt_config_gives_clear_error() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        let dir = TempDir::new().unwrap();
+        let config_path = dir.path().join("config.toml");
+        std::fs::write(&config_path, "this is not valid TOML {{{{").unwrap();
+
+        let opts = ResolveOptions {
+            config_path: Some(config_path.clone()),
+            no_interactive: true,
+            ..Default::default()
+        };
+
+        let result = resolve(&opts);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("Failed to parse config"));
+        assert!(err.contains(&config_path.display().to_string()));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_warns_on_insecure_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _lock = ENV_MUTEX.lock().unwrap();
+        let dir = TempDir::new().unwrap();
+        let config_path = dir.path().join("config.toml");
+        std::fs::write(
+            &config_path,
+            r#"
+            [coord]
+            url = "http://localhost:8080"
+            admin_api_key = "test_key"
+            [relay]
+            url = "ws://127.0.0.1:7777"
+            [mesh]
+            listen = "0.0.0.0:8443"
+            [storage]
+            data_dir = "/var/lib/goy-node"
+            [metrics]
+            listen = "127.0.0.1:9090"
+        "#,
+        )
+        .unwrap();
+
+        // Tornar world-readable
+        std::fs::set_permissions(&config_path, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        let opts = ResolveOptions {
+            config_path: Some(config_path),
+            no_interactive: true,
+            ..Default::default()
+        };
+
+        let resolved = resolve(&opts).unwrap();
+        assert!(resolved.warnings.iter().any(|w| {
+            w.contains("insecure") || w.contains("permission") || w.contains("644")
+        }));
     }
 }

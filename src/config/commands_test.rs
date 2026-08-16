@@ -129,4 +129,26 @@ mod tests {
             assert_eq!(perms.mode() & 0o777, 0o600);
         }
     }
+
+    #[test]
+    fn test_set_invalid_value_does_not_modify_file() {
+        let dir = TempDir::new().unwrap();
+        let config_path = dir.path().join("config.toml");
+        let config = valid_test_config();
+        write_config(&config_path, &config).unwrap();
+
+        let original_content = std::fs::read_to_string(&config_path).unwrap();
+
+        let args = SetArgs {
+            key: "coord.heartbeat_interval_secs".to_string(),
+            value: "not_a_number".to_string(),
+        };
+
+        let result = cmd_set(&args, Some(&config_path));
+        assert!(result.is_err());
+
+        // Verificar que ficheiro em disco não foi modificado
+        let disk_content = std::fs::read_to_string(&config_path).unwrap();
+        assert_eq!(disk_content, original_content);
+    }
 }

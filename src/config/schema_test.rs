@@ -104,6 +104,29 @@ mod tests {
         assert_eq!(config.mesh.seeds, deserialized.mesh.seeds);
     }
 
+    #[test]
+    fn test_rejects_unknown_fields() {
+        let toml_str = r#"
+            [coord]
+            url = "http://localhost:8080"
+            admin_api_key = "test"
+            unknown_field = "should_fail"
+
+            [relay]
+            url = "ws://127.0.0.1:7777"
+            [mesh]
+            listen = "0.0.0.0:8443"
+            [storage]
+            data_dir = "/var/lib/goy-node"
+            [metrics]
+            listen = "127.0.0.1:9090"
+        "#;
+
+        let result: Result<GoyNodeConfig, _> = toml::from_str(toml_str);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("unknown field"));
+    }
+
     fn valid_config() -> GoyNodeConfig {
         GoyNodeConfig {
             coord: CoordConfig {
