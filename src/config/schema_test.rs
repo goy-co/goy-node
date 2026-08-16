@@ -160,4 +160,40 @@ mod tests {
             },
         }
     }
+
+    #[test]
+    fn test_fuzz_toml_random_inputs() {
+        let fuzz_inputs = [
+            "",
+            "null",
+            "12345",
+            "[coord]\nurl = 123",
+            "[coord]\nurl = \"http://localhost\"\nadmin_api_key = 999",
+            "[[[[[[[[[[",
+            "key = \"\x00\x01\x02\"",
+            "[storage]\ndata_dir = []",
+            "[mesh]\nseeds = \"not_an_array\"",
+            "unknown = true\n[coord]\nurl = \"http://a\"\nadmin_api_key = \"b\"",
+        ];
+
+        for input in fuzz_inputs {
+            // Parser deve rejeitar ou aceitar graciosamente sem panic
+            let _ = toml::from_str::<GoyNodeConfig>(input);
+        }
+    }
+
+    #[test]
+    fn test_cross_platform_path_handling() {
+        let mut config = valid_config();
+        #[cfg(windows)]
+        {
+            config.storage.data_dir = PathBuf::from("C:\\ProgramData\\goy-node");
+            assert!(config.validate().is_ok());
+        }
+        #[cfg(not(windows))]
+        {
+            config.storage.data_dir = PathBuf::from("/var/lib/goy-node");
+            assert!(config.validate().is_ok());
+        }
+    }
 }

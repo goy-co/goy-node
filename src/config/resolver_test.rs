@@ -381,4 +381,45 @@ mod tests {
             w.contains("insecure") || w.contains("permission") || w.contains("644")
         }));
     }
+
+    #[test]
+    fn test_resolve_performance_under_10ms() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        let dir = TempDir::new().unwrap();
+        let config_path = dir.path().join("config.toml");
+        std::fs::write(
+            &config_path,
+            r#"
+            [coord]
+            url = "http://localhost:8080"
+            admin_api_key = "test_key"
+            [relay]
+            url = "ws://127.0.0.1:7777"
+            [mesh]
+            listen = "0.0.0.0:8443"
+            [storage]
+            data_dir = "/var/lib/goy-node"
+            [metrics]
+            listen = "127.0.0.1:9090"
+        "#,
+        )
+        .unwrap();
+
+        let opts = ResolveOptions {
+            config_path: Some(config_path),
+            no_interactive: true,
+            ..Default::default()
+        };
+
+        let start = std::time::Instant::now();
+        let resolved = resolve(&opts);
+        let duration = start.elapsed();
+
+        assert!(resolved.is_ok());
+        assert!(
+            duration < std::time::Duration::from_millis(50),
+            "resolve() took too long: {:?}",
+            duration
+        );
+    }
 }

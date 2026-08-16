@@ -89,4 +89,28 @@ mod tests {
                 && is_default_unconfigured(&sources, "coord.url"));
         assert!(!missing_url); // URL está presente e configurada no ficheiro
     }
+
+    #[test]
+    fn test_auto_generate_with_partial_cli_flags_triggers_prompts_for_rest() {
+        let mut config = default_goy_node_config();
+        // Simular que coord_url veio de flag CLI mas admin_api_key não
+        config.coord.url = "http://10.0.0.5:8080".to_string();
+        let mut sources = HashMap::new();
+        sources.insert(
+            "coord.url".to_string(),
+            ConfigSource::CliFlag("coord-url".to_string()),
+        );
+
+        let opts = ResolveOptions {
+            no_interactive: true,
+            ..Default::default()
+        };
+
+        // Em non-interactive, deve falhar acusando especificamente admin_api_key e NÃO coord.url
+        let result = prompt_missing_fields(&mut config, &opts, &sources);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("coord.admin_api_key"));
+        assert!(!err.contains("coord.url"));
+    }
 }

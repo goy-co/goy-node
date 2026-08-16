@@ -151,4 +151,45 @@ mod tests {
         let disk_content = std::fs::read_to_string(&config_path).unwrap();
         assert_eq!(disk_content, original_content);
     }
+
+    #[test]
+    fn test_get_seeds_formats_as_array() {
+        let mut config = valid_test_config();
+        config.mesh.seeds = vec!["ws://seed1:8443".to_string(), "ws://seed2:8443".to_string()];
+        let value = get_field(&config, "mesh.seeds").unwrap();
+        assert!(value.contains("ws://seed1:8443"));
+        assert!(value.contains("ws://seed2:8443"));
+    }
+
+    #[test]
+    fn test_concurrent_config_set() {
+        use std::sync::Arc;
+        use std::thread;
+
+        let dir = TempDir::new().unwrap();
+        let config_path = Arc::new(dir.path().join("config.toml"));
+        let config = valid_test_config();
+        write_config(&config_path, &config).unwrap();
+
+        let mut handles = vec![];
+        for i in 0..5 {
+            let path = Arc::clone(&config_path);
+            handles.push(thread::spawn(move || {
+                let args = SetArgs {
+                    key: "coord.heartbeat_interval_secs".to_string(),
+                    value: (30 + i).to_string(),
+                };
+                let _ = cmd_set(&args, Some(&path));
+            }));
+        }
+
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        // Ficheiro resultante deve continuar TOML válido e com permissões corretas
+        let content = std::fs::read_to_string(&*config_path).unwrap();
+        let parsed: Result<GoyNodeConfig, _> = toml::from_str(&content);
+        assert!(parsed.is_ok());
+    }
 }

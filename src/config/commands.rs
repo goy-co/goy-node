@@ -372,7 +372,7 @@ pub fn get_field(config: &GoyNodeConfig, key: &str) -> Result<String> {
         "mesh.registry_url" => Ok(config.mesh.registry_url.clone().unwrap_or_default()),
         "mesh.heartbeat_secs" => Ok(config.mesh.heartbeat_secs.to_string()),
         "mesh.tls_enabled" => Ok(config.mesh.tls_enabled.to_string()),
-        "mesh.seeds" => Ok(toml::to_string(&config.mesh.seeds)?.trim().to_string()),
+        "mesh.seeds" => Ok(serde_json::to_string(&config.mesh.seeds)?),
         "storage.data_dir" => Ok(config.storage.data_dir.display().to_string()),
         "storage.extra_contribution_gb" => Ok(config.storage.extra_contribution_gb.to_string()),
         "metrics.listen" => Ok(config.metrics.listen.clone()),
