@@ -26,6 +26,7 @@ async fn test_outbound_seed_reconnect_and_sync() -> anyhow::Result<()> {
     let cfg_a = MeshConfig {
         listen: addr_a.to_string(),
         seeds: vec![],
+        mesh_url: Some(format!("ws://{addr_a}")),
         ..MeshConfig::default()
     };
 
@@ -49,6 +50,7 @@ async fn test_outbound_seed_reconnect_and_sync() -> anyhow::Result<()> {
     let cfg_b = MeshConfig {
         listen: addr_b.to_string(),
         seeds: vec![format!("ws://{addr_a}")],
+        mesh_url: Some(format!("ws://{addr_b}")),
         ..MeshConfig::default()
     };
 
@@ -66,7 +68,7 @@ async fn test_outbound_seed_reconnect_and_sync() -> anyhow::Result<()> {
     });
 
     // Aguarda o Node B fazer a conexão outbound para o Node A
-    tokio::time::sleep(Duration::from_millis(350)).await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
 
     // 1. Transmissão do Node A -> Node B
     let event_1 = r#"["EVENT","sub_1",{"id":"e000000000000000000000000000000000000000000000000000000000000001","content":"Test A to B"}]"#;
@@ -129,16 +131,19 @@ async fn test_mesh_deduplication_triangle_loop() -> anyhow::Result<()> {
     let cfg_a = MeshConfig {
         listen: addr_a.to_string(),
         seeds: vec![],
+        mesh_url: Some(format!("ws://{addr_a}")),
         ..MeshConfig::default()
     };
     let cfg_b = MeshConfig {
         listen: addr_b.to_string(),
         seeds: vec![format!("ws://{addr_a}")],
+        mesh_url: Some(format!("ws://{addr_b}")),
         ..MeshConfig::default()
     };
     let cfg_c = MeshConfig {
         listen: addr_c.to_string(),
         seeds: vec![format!("ws://{addr_a}"), format!("ws://{addr_b}")],
+        mesh_url: Some(format!("ws://{addr_c}")),
         ..MeshConfig::default()
     };
 

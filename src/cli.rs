@@ -1,4 +1,4 @@
-//! Admin CLI do Goy Node — comandos de gestão local do nó via HTTP.
+//! Admin CLI do Goy Node — comandos de gestão local do nó via HTTP e configuração.
 //!
 //! Subcomandos suportados:
 //! - `goy-node run` → inicia o nó mesh agent (comportamento padrão)
@@ -6,6 +6,10 @@
 //! - `goy-node peers` → lê `/peers` e lista peers conectados em tabela alinhada
 //! - `goy-node info` → lê `/info` e lista metadados do nó
 //! - `goy-node metrics` → lê `/metrics` e imprime o dump Prometheus raw
+//! - `goy-node onboard` → onboarding interativo/automatizado na VPN e API
+//! - `goy-node offboard` → desconectar e desregistar da VPN
+//! - `goy-node config show` → exibe a configuração resolvida
+//! - `goy-node config validate` → valida a configuração e mostra as origens
 //!
 //! A flag `--json` (global) formata o output de qualquer comando de consulta como JSON.
 
@@ -15,7 +19,7 @@ use clap::{Parser, Subcommand};
 use reqwest::Client;
 use serde_json::Value;
 
-#[derive(Parser, Debug)]
+#[derive(Parser, Debug, Clone, Default)]
 #[command(
     name = "goy-node",
     version = env!("CARGO_PKG_VERSION"),
@@ -23,13 +27,34 @@ use serde_json::Value;
     about = "Mesh agent for Goy Node — automatic Nostr relay synchronization"
 )]
 pub struct Cli {
-    /// Caminho alternativo para o ficheiro de configuração config.toml
-    #[arg(short, long, value_name = "PATH", global = true)]
+    /// Path do ficheiro de configuração TOML.
+    /// Default: ~/.config/goy-node/config.toml
+    #[arg(short, long, value_name = "PATH", global = true, env = "GOY_CONFIG_PATH")]
     pub config: Option<PathBuf>,
 
-    /// Caminho alternativo para o diretório de dados (seen_ids, peer_cursors)
-    #[arg(short, long, value_name = "PATH", global = true)]
+    /// Override do URL do coord-server.
+    #[arg(long, global = true, env = "GOY_API_URL")]
+    pub coord_url: Option<String>,
+
+    /// Override da admin API key do coord-server.
+    #[arg(long, global = true, env = "GOY_ADMIN_API_KEY")]
+    pub admin_api_key: Option<String>,
+
+    /// Override do diretório de dados (seen_ids, peer_cursors).
+    #[arg(short, long, value_name = "PATH", global = true, env = "GOY_DATA_DIR")]
     pub data_dir: Option<PathBuf>,
+
+    /// Override do nível de log (trace, debug, info, warn, error).
+    #[arg(long, global = true, env = "GOY_LOG_LEVEL")]
+    pub log_level: Option<String>,
+
+    /// Override do formato de log (pretty, json).
+    #[arg(long, global = true, env = "GOY_LOG_FORMAT")]
+    pub log_format: Option<String>,
+
+    /// Desativar prompts interativos. Falhar com erro se faltar config obrigatória.
+    #[arg(long, global = true)]
+    pub no_interactive: bool,
 
     /// Formatar saída dos comandos de consulta como JSON machine-readable
     #[arg(long, global = true)]
@@ -39,10 +64,10 @@ pub struct Cli {
     pub command: Option<Commands>,
 }
 
-#[derive(Subcommand, Debug, PartialEq, Eq)]
+#[derive(Subcommand, Debug, PartialEq, Eq, Clone)]
 pub enum Commands {
     /// Inicia o nó mesh agent (comportamento padrão)
-    Run,
+    Run(RunArgs),
     /// Exibe o estado e saúde atual do nó (health)
     Status,
     /// Lista os peers atualmente conectados ao nó
@@ -52,43 +77,146 @@ pub enum Commands {
     /// Exibe o dump das métricas Prometheus em formato texto
     Metrics,
     /// Onboarding interativo/automatizado do nó na VPN e plataforma Goy Company
-    Onboard {
-        /// Chave de autenticação fornecida pela Goy Company (começa por gc_)
-        #[arg(long)]
-        auth_key: Option<String>,
-        /// Execução não-interativa (sem prompts, ideal para automação/CI)
-        #[arg(long)]
-        non_interactive: bool,
-        /// Configurar apenas a VPN, sem registar na API Goy Company
-        #[arg(long)]
-        vpn_only: bool,
-    },
+    Onboard(OnboardArgs),
     /// Deregistar o nó da plataforma e desconectar da VPN
     Offboard {
         /// Confirmar remoção sem prompt de confirmação
         #[arg(long)]
         force: bool,
     },
+    /// Gerir configuração
+    Config(ConfigArgs),
+}
+
+/// Argumentos do subcomando run
+#[derive(Parser, Debug, PartialEq, Eq, Clone, Default)]
+pub struct RunArgs {
+    /// Seeds adicionais para bootstrap (pode ser repetido)
+    #[arg(long)]
+    pub seed: Vec<String>,
+}
+
+/// Argumentos do subcomando onboard
+#[derive(Parser, Debug, PartialEq, Eq, Clone, Default)]
+pub struct OnboardArgs {
+    /// Chave de autenticação fornecida pela Goy Company (começa por gc_)
+    #[arg(long)]
+    pub auth_key: Option<String>,
+    /// Execução não-interativa (sem prompts, ideal para automação/CI)
+    #[arg(long)]
+    pub non_interactive: bool,
+    /// Configurar apenas a VPN, sem registar na API Goy Company
+    #[arg(long)]
+    pub vpn_only: bool,
+}
+
+/// Argumentos do subcomando config
+#[derive(Parser, Debug, PartialEq, Eq, Clone)]
+pub struct ConfigArgs {
+    #[command(subcommand)]
+    pub action: ConfigAction,
+}
+
+#[derive(Subcommand, Debug, PartialEq, Eq, Clone)]
+pub enum ConfigAction {
+    /// Gerar configuração inicial (interativo ou programático)
+    Init(ConfigInitArgs),
+    /// Mostrar configuração atual (secrets mascarados)
+    Show,
+    /// Validar configuração sem arrancar
+    Validate,
+    /// Alterar um campo específico
+    Set(ConfigSetArgs),
+    /// Ler um campo específico
+    Get(ConfigGetArgs),
+}
+
+/// Argumentos do subcomando `config init`
+#[derive(Parser, Debug, PartialEq, Eq, Clone, Default)]
+pub struct ConfigInitArgs {
+    /// Coord-server URL
+    #[arg(long)]
+    pub coord_url: Option<String>,
+
+    /// Admin API key
+    #[arg(long)]
+    pub admin_api_key: Option<String>,
+
+    /// Data directory
+    #[arg(long)]
+    pub data_dir: Option<PathBuf>,
+
+    /// Relay URL
+    #[arg(long)]
+    pub relay_url: Option<String>,
+
+    /// Mesh listen address
+    #[arg(long)]
+    pub mesh_listen: Option<String>,
+
+    /// Metrics listen address
+    #[arg(long)]
+    pub metrics_listen: Option<String>,
+
+    /// Log level
+    #[arg(long)]
+    pub log_level: Option<String>,
+
+    /// Não fazer prompts interativos
+    #[arg(long)]
+    pub non_interactive: bool,
+
+    /// Sobrescrever config existente sem perguntar
+    #[arg(long)]
+    pub force: bool,
+}
+
+/// Argumentos do subcomando `config set`
+#[derive(Parser, Debug, PartialEq, Eq, Clone)]
+pub struct ConfigSetArgs {
+    /// Campo em notação dotted (ex: coord.url)
+    pub key: String,
+    /// Novo valor
+    pub value: String,
+}
+
+/// Argumentos do subcomando `config get`
+#[derive(Parser, Debug, PartialEq, Eq, Clone)]
+pub struct ConfigGetArgs {
+    /// Campo em notação dotted (ex: coord.url)
+    pub key: String,
+}
+
+impl From<&Cli> for crate::config::resolver::ResolveOptions {
+    fn from(cli: &Cli) -> Self {
+        Self {
+            config_path: cli.config.clone(),
+            coord_url: cli.coord_url.clone(),
+            admin_api_key: cli.admin_api_key.clone(),
+            data_dir: cli.data_dir.clone(),
+            log_level: cli.log_level.clone(),
+            log_format: cli.log_format.clone(),
+            no_interactive: cli.no_interactive,
+        }
+    }
 }
 
 /// Executa o subcomando CLI especificado. Retorna `Ok(true)` se um subcomando de consulta
 /// foi tratado e o processo deve terminar, ou `Ok(false)` se o comando for `Run` (iniciar o nó).
 pub async fn handle_cli(cli: &Cli, metrics_listen: Option<&str>) -> anyhow::Result<bool> {
-    let command = cli.command.as_ref().unwrap_or(&Commands::Run);
-    if command == &Commands::Run {
+    let default_run = Commands::Run(RunArgs::default());
+    let command = cli.command.as_ref().unwrap_or(&default_run);
+    if matches!(command, Commands::Run(_)) {
         return Ok(false);
     }
 
     match command {
-        Commands::Onboard {
-            auth_key,
-            non_interactive,
-            vpn_only,
-        } => {
+        Commands::Onboard(args) => {
+            let non_interactive = args.non_interactive || cli.no_interactive;
             let code = crate::onboard::run_onboard(
-                auth_key.clone(),
-                *non_interactive,
-                *vpn_only,
+                args.auth_key.clone(),
+                non_interactive,
+                args.vpn_only,
                 cli.config.as_deref(),
                 cli.data_dir.as_deref(),
             )
@@ -103,6 +231,10 @@ pub async fn handle_cli(cli: &Cli, metrics_listen: Option<&str>) -> anyhow::Resu
             )
             .await?;
             std::process::exit(code);
+        }
+        Commands::Config(_) => {
+            // Tratado no main
+            return Ok(false);
         }
         _ => {}
     }
@@ -133,7 +265,7 @@ pub async fn handle_cli(cli: &Cli, metrics_listen: Option<&str>) -> anyhow::Resu
     let status_code = resp.status();
     let text = resp.text().await?;
 
-    if command == &Commands::Metrics {
+    if matches!(command, Commands::Metrics) {
         if cli.json {
             let json_val = serde_json::json!({
                 "metrics": text,
@@ -294,10 +426,142 @@ mod tests {
 
         let args_run = vec!["goy-node", "run"];
         let cli_run = Cli::parse_from(args_run);
-        assert_eq!(cli_run.command, Some(Commands::Run));
+        assert_eq!(cli_run.command, Some(Commands::Run(RunArgs::default())));
 
         let args_default = vec!["goy-node"];
         let cli_default = Cli::parse_from(args_default);
         assert_eq!(cli_default.command, None);
     }
+
+    #[test]
+    fn test_parse_onboard_minimal() {
+        let cli = Cli::parse_from(["goy-node", "onboard", "--auth-key", "gc_test_1234567890"]);
+        assert!(matches!(cli.command, Some(Commands::Onboard(_))));
+        assert!(cli.coord_url.is_none());
+        assert!(!cli.no_interactive);
+    }
+
+    #[test]
+    fn test_parse_global_flags_with_subcommand() {
+        let cli = Cli::parse_from([
+            "goy-node",
+            "--coord-url",
+            "http://10.0.0.5:8080",
+            "--admin-api-key",
+            "secret",
+            "--no-interactive",
+            "--log-level",
+            "debug",
+            "onboard",
+            "--auth-key",
+            "gc_test_1234567890",
+        ]);
+        assert_eq!(cli.coord_url.as_deref(), Some("http://10.0.0.5:8080"));
+        assert_eq!(cli.admin_api_key.as_deref(), Some("secret"));
+        assert!(cli.no_interactive);
+        assert_eq!(cli.log_level.as_deref(), Some("debug"));
+    }
+
+    #[test]
+    fn test_parse_run_with_seeds() {
+        let cli = Cli::parse_from([
+            "goy-node",
+            "run",
+            "--seed",
+            "ws://peer1:8443",
+            "--seed",
+            "ws://peer2:8443",
+        ]);
+        if let Some(Commands::Run(args)) = &cli.command {
+            assert_eq!(args.seed.len(), 2);
+            assert_eq!(args.seed[0], "ws://peer1:8443");
+            assert_eq!(args.seed[1], "ws://peer2:8443");
+        } else {
+            panic!("expected Run command");
+        }
+    }
+
+    #[test]
+    fn test_parse_config_show_and_validate() {
+        let cli_show = Cli::parse_from(["goy-node", "config", "show"]);
+        assert_eq!(
+            cli_show.command,
+            Some(Commands::Config(ConfigArgs {
+                action: ConfigAction::Show
+            }))
+        );
+
+        let cli_val = Cli::parse_from(["goy-node", "config", "validate"]);
+        assert_eq!(
+            cli_val.command,
+            Some(Commands::Config(ConfigArgs {
+                action: ConfigAction::Validate
+            }))
+        );
+    }
+
+    #[test]
+    fn test_resolve_options_from_cli() {
+        let cli = Cli::parse_from([
+            "goy-node",
+            "--coord-url",
+            "http://x:8080",
+            "--data-dir",
+            "/custom/data",
+            "--no-interactive",
+            "run",
+        ]);
+        let opts = crate::config::resolver::ResolveOptions::from(&cli);
+        assert_eq!(opts.coord_url.as_deref(), Some("http://x:8080"));
+        assert_eq!(opts.data_dir, Some(PathBuf::from("/custom/data")));
+        assert!(opts.no_interactive);
+    }
+
+    #[test]
+    fn test_parse_config_init_set_get() {
+        let cli_init = Cli::parse_from([
+            "goy-node",
+            "config",
+            "init",
+            "--coord-url",
+            "http://10.0.0.5:8080",
+            "--admin-api-key",
+            "secret_key",
+            "--non-interactive",
+            "--force",
+        ]);
+        if let Some(Commands::Config(ConfigArgs {
+            action: ConfigAction::Init(args),
+        })) = cli_init.command
+        {
+            assert_eq!(args.coord_url.as_deref(), Some("http://10.0.0.5:8080"));
+            assert_eq!(args.admin_api_key.as_deref(), Some("secret_key"));
+            assert!(args.non_interactive);
+            assert!(args.force);
+        } else {
+            panic!("expected ConfigAction::Init");
+        }
+
+        let cli_set = Cli::parse_from(["goy-node", "config", "set", "coord.url", "http://new:8080"]);
+        assert_eq!(
+            cli_set.command,
+            Some(Commands::Config(ConfigArgs {
+                action: ConfigAction::Set(ConfigSetArgs {
+                    key: "coord.url".to_string(),
+                    value: "http://new:8080".to_string(),
+                })
+            }))
+        );
+
+        let cli_get = Cli::parse_from(["goy-node", "config", "get", "coord.url"]);
+        assert_eq!(
+            cli_get.command,
+            Some(Commands::Config(ConfigArgs {
+                action: ConfigAction::Get(ConfigGetArgs {
+                    key: "coord.url".to_string(),
+                })
+            }))
+        );
+    }
 }
+

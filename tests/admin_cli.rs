@@ -60,40 +60,36 @@ async fn test_admin_cli_endpoints_and_json_formatting() -> anyhow::Result<()> {
 
     // 1. Status subcommand with --json
     let cli_status = Cli {
-        config: None,
-        data_dir: None,
         json: true,
         command: Some(Commands::Status),
+        ..Default::default()
     };
     let handled = handle_cli(&cli_status, Some(&metrics_listen)).await?;
     assert!(handled);
 
     // 2. Peers subcommand with --json
     let cli_peers = Cli {
-        config: None,
-        data_dir: None,
         json: true,
         command: Some(Commands::Peers),
+        ..Default::default()
     };
     let handled = handle_cli(&cli_peers, Some(&metrics_listen)).await?;
     assert!(handled);
 
     // 3. Info subcommand with text output
     let cli_info = Cli {
-        config: None,
-        data_dir: None,
         json: false,
         command: Some(Commands::Info),
+        ..Default::default()
     };
     let handled = handle_cli(&cli_info, Some(&metrics_listen)).await?;
     assert!(handled);
 
     // 4. Metrics subcommand
     let cli_metrics = Cli {
-        config: None,
-        data_dir: None,
         json: false,
         command: Some(Commands::Metrics),
+        ..Default::default()
     };
     let handled = handle_cli(&cli_metrics, Some(&metrics_listen)).await?;
     assert!(handled);

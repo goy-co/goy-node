@@ -6,7 +6,6 @@
 use std::path::PathBuf;
 
 use clap::Parser;
-use directories::ProjectDirs;
 use tokio::signal;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info};
@@ -33,44 +32,102 @@ async fn main() -> anyhow::Result<()> {
     // Parse de argumentos CLI (trata --help e --version automaticamente)
     let cli = cli::Cli::parse();
 
-    // ── Logging estruturado (silenciar logs normais para subcomandos de consulta se não for Run) ──
-    let is_query_cmd = cli
-        .command
-        .as_ref()
-        .is_some_and(|c| c != &cli::Commands::Run);
-    let default_filter = if is_query_cmd { "warn" } else { "info" };
+    // ── Subcomandos `config init`, `config set`, `config get` (executam antes da resolução geral) ──
+    if let Some(cli::Commands::Config(ref args)) = cli.command {
+        match &args.action {
+            cli::ConfigAction::Init(init_args) => {
+                let cmd_args = config::commands::InitArgs {
+                    coord_url: init_args.coord_url.clone(),
+                    admin_api_key: init_args.admin_api_key.clone(),
+                    data_dir: init_args.data_dir.clone(),
+                    relay_url: init_args.relay_url.clone(),
+                    mesh_listen: init_args.mesh_listen.clone(),
+                    metrics_listen: init_args.metrics_listen.clone(),
+                    log_level: init_args.log_level.clone(),
+                    non_interactive: init_args.non_interactive || cli.no_interactive,
+                    force: init_args.force,
+                };
+                config::commands::cmd_init(&cmd_args, cli.config.as_deref())?;
+                return Ok(());
+            }
+            cli::ConfigAction::Set(set_args) => {
+                let cmd_args = config::commands::SetArgs {
+                    key: set_args.key.clone(),
+                    value: set_args.value.clone(),
+                };
+                config::commands::cmd_set(&cmd_args, cli.config.as_deref())?;
+                return Ok(());
+            }
+            cli::ConfigAction::Get(get_args) => {
+                let cmd_args = config::commands::GetArgs {
+                    key: get_args.key.clone(),
+                };
+                config::commands::cmd_get(&cmd_args, cli.config.as_deref())?;
+                return Ok(());
+            }
+            _ => {}
+        }
+    }
 
-    fmt()
-        .with_env_filter(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(default_filter)),
-        )
-        .init();
-
-    // ── Configuração ───────────────────────────────────────────────────
-    let project_dirs = ProjectDirs::from("com", "goy-co", "goy-node")
-        .expect("failed to determine project directories");
-
-    let config_path = cli
-        .config
-        .clone()
-        .or_else(|| std::env::var("GOY_NODE_CONFIG").map(PathBuf::from).ok())
-        .unwrap_or_else(|| project_dirs.config_dir().join("config.toml"));
-
-    let mut cfg = match config::Config::load_or_generate(&config_path) {
-        Ok(c) => c,
+    // ── Resolver configuração ANTES de inicializar logging ─────────────
+    let resolve_opts = config::resolver::ResolveOptions::from(&cli);
+    let resolved = match config::resolver::resolve(&resolve_opts) {
+        Ok(r) => r,
         Err(e) => {
+            // Erro de config antes do tracing estar pronto → stderr
             eprintln!("❌ Configuration error: {e}");
             std::process::exit(1);
         }
     };
 
-    if let Some(ref cli_data_dir) = cli.data_dir {
-        info!(
-            "🔧 Override from CLI --data-dir: {}",
-            cli_data_dir.display()
-        );
-        cfg.storage.data_dir = cli_data_dir.clone();
+    // ── Imprimir warnings de resolução ─────────────────────────────────
+    for w in &resolved.warnings {
+        eprintln!("{w}");
     }
+
+    // ── Subcomando `config` (show / validate) ───────────────────────────
+    if let Some(cli::Commands::Config(args)) = &cli.command {
+        match &args.action {
+            cli::ConfigAction::Show => {
+                let mut masked_config = resolved.config.clone();
+                masked_config.coord.admin_api_key =
+                    config::resolver::mask_secret(&masked_config.coord.admin_api_key);
+                println!("{}", toml::to_string_pretty(&masked_config)?);
+                return Ok(());
+            }
+            cli::ConfigAction::Validate => {
+                println!("✅ Configuration is valid.");
+                println!("Sources:");
+                let mut sorted_sources: Vec<_> = resolved.sources.iter().collect();
+                sorted_sources.sort_by_key(|(k, _)| *k);
+                for (field, source) in sorted_sources {
+                    println!("  {field} ← {source}");
+                }
+                return Ok(());
+            }
+            _ => {}
+        }
+    }
+
+    // ── Logging estruturado (silenciar logs normais para subcomandos de consulta se não for Run) ──
+    let is_query_cmd = cli
+        .command
+        .as_ref()
+        .is_some_and(|c| !matches!(c, cli::Commands::Run(_)));
+    init_tracing(&resolved.config.log, is_query_cmd)?;
+
+    // ── Converter para Config de execução ──────────────────────────────
+    let mut cfg = config::Config::from(resolved.config);
+
+    // Merge de seeds passadas via CLI (se subcomando for Run)
+    if let Some(cli::Commands::Run(run_args)) = &cli.command {
+        cfg.mesh.seeds.extend(run_args.seed.iter().cloned());
+    }
+
+    let config_path = cli
+        .config
+        .clone()
+        .unwrap_or_else(config::default_config_path);
     let data_dir = cfg.storage.data_dir.clone();
 
     // Tratar subcomandos de consulta (status, peers, info, metrics, onboard, offboard)
@@ -80,6 +137,27 @@ async fn main() -> anyhow::Result<()> {
 
     // Subcomando `run` (ou default): iniciar o nó mesh agent
     cmd_run(cfg, config_path, data_dir).await
+}
+
+fn init_tracing(log_config: &config::schema::LogConfig, is_query_cmd: bool) -> anyhow::Result<()> {
+    let default_filter = if is_query_cmd {
+        "warn"
+    } else {
+        &log_config.level
+    };
+    let filter =
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(default_filter));
+
+    match log_config.format.as_str() {
+        "json" => {
+            fmt().json().with_env_filter(filter).init();
+        }
+        _ => {
+            fmt().pretty().with_env_filter(filter).init();
+        }
+    }
+
+    Ok(())
 }
 
 async fn cmd_run(

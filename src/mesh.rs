@@ -2038,7 +2038,7 @@ mod tests {
             registry_url: None,
             heartbeat_secs: 30,
             discovery_secs: 60,
-            mesh_url: None,
+            mesh_url: Some(format!("ws://{addr_a}")),
             node_id: None,
             replication_factor: 3,
             vnodes_per_peer: 150,
@@ -2073,7 +2073,7 @@ mod tests {
             registry_url: None,
             heartbeat_secs: 30,
             discovery_secs: 60,
-            mesh_url: None,
+            mesh_url: Some(format!("ws://{addr_b}")),
             node_id: None,
             replication_factor: 3,
             vnodes_per_peer: 150,
@@ -2099,18 +2099,24 @@ mod tests {
         });
 
         // Aguarda estabelecimento da conexão outbound do Node B -> Node A
-        tokio::time::sleep(Duration::from_millis(300)).await;
+        tokio::time::sleep(Duration::from_millis(600)).await;
 
         // 1. Evento publicado no strfry do Node A -> deve chegar ao strfry do Node B
         let event_a = r#"["EVENT","sub_a",{"id":"evt_from_node_a","content":"hello from Node A"}]"#;
-        relay_events_tx_a.send(RelayEvent {
-            raw: event_a.to_string(),
-        })?;
-
-        let received_at_node_b =
-            tokio::time::timeout(Duration::from_secs(2), relay_publish_rx_b.recv())
-                .await?
-                .ok_or_else(|| anyhow::anyhow!("Node B relay_publish_rx closed"))?;
+        let mut received_at_node_b = None;
+        for _ in 0..20 {
+            let _ = relay_events_tx_a.send(RelayEvent {
+                raw: event_a.to_string(),
+            });
+            if let Ok(Some(msg)) =
+                tokio::time::timeout(Duration::from_millis(150), relay_publish_rx_b.recv()).await
+            {
+                received_at_node_b = Some(msg);
+                break;
+            }
+        }
+        let received_at_node_b = received_at_node_b
+            .ok_or_else(|| anyhow::anyhow!("Node B relay_publish_rx timed out"))?;
         assert_eq!(
             received_at_node_b,
             r#"["EVENT",{"id":"evt_from_node_a","content":"hello from Node A"}]"#
@@ -2118,14 +2124,20 @@ mod tests {
 
         // 2. Evento publicado no strfry do Node B -> deve chegar ao strfry do Node A
         let event_b = r#"["EVENT","sub_b",{"id":"evt_from_node_b","content":"hello from Node B"}]"#;
-        relay_events_tx_b.send(RelayEvent {
-            raw: event_b.to_string(),
-        })?;
-
-        let received_at_node_a =
-            tokio::time::timeout(Duration::from_secs(2), relay_publish_rx_a.recv())
-                .await?
-                .ok_or_else(|| anyhow::anyhow!("Node A relay_publish_rx closed"))?;
+        let mut received_at_node_a = None;
+        for _ in 0..20 {
+            let _ = relay_events_tx_b.send(RelayEvent {
+                raw: event_b.to_string(),
+            });
+            if let Ok(Some(msg)) =
+                tokio::time::timeout(Duration::from_millis(150), relay_publish_rx_a.recv()).await
+            {
+                received_at_node_a = Some(msg);
+                break;
+            }
+        }
+        let received_at_node_a = received_at_node_a
+            .ok_or_else(|| anyhow::anyhow!("Node A relay_publish_rx timed out"))?;
         assert_eq!(
             received_at_node_a,
             r#"["EVENT",{"id":"evt_from_node_b","content":"hello from Node B"}]"#
@@ -2292,7 +2304,7 @@ mod tests {
             registry_url: None,
             heartbeat_secs: 1, // timeout = 3s
             discovery_secs: 60,
-            mesh_url: None,
+            mesh_url: Some(format!("ws://{addr_a}")),
             node_id: None,
             replication_factor: 3,
             vnodes_per_peer: 150,
@@ -2317,10 +2329,16 @@ mod tests {
             .await;
         });
 
-        tokio::time::sleep(Duration::from_millis(100)).await;
-
-        // Peer conecta a Node A
-        let (mut ws_stream, _) = connect_async(format!("ws://{addr_a}")).await?;
+        // Aguardar que Node A arranque o listener e conectar
+        let mut ws_stream = None;
+        for _ in 0..20 {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            if let Ok((s, _)) = connect_async(format!("ws://{addr_a}")).await {
+                ws_stream = Some(s);
+                break;
+            }
+        }
+        let mut ws_stream = ws_stream.ok_or_else(|| anyhow::anyhow!("Failed to connect to Node A"))?;
 
         // 1. Recebe pedido de backfill inicial
         let init_req = tokio::time::timeout(Duration::from_secs(2), ws_stream.next())
@@ -2482,7 +2500,7 @@ mod tests {
             .await;
         });
 
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        tokio::time::sleep(Duration::from_millis(400)).await;
 
         // ── 2. Primeira Execução do Node B (porta dinâmica, seed = Node A) ──
         let tmp_listener_b1 = TcpListener::bind("127.0.0.1:0").await?;

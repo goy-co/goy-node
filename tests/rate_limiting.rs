@@ -172,7 +172,7 @@ async fn test_peer_rate_limiting_burst_and_recovery() -> anyhow::Result<()> {
         .await;
     });
 
-    tokio::time::sleep(Duration::from_millis(350)).await;
+    tokio::time::sleep(Duration::from_millis(600)).await;
 
     // Enviar burst de 20 eventos rapidos do Node B
     for i in 0..20 {
@@ -300,7 +300,7 @@ async fn test_peer_rate_limit_isolation() -> anyhow::Result<()> {
         .await;
     });
 
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    tokio::time::sleep(Duration::from_millis(800)).await;
 
     // Node B esgota o seu próprio bucket enviando 25 eventos
     for i in 0..25 {

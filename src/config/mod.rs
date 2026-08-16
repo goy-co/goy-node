@@ -1,10 +1,18 @@
+pub mod commands;
 pub mod compat;
+pub mod resolver;
 pub mod schema;
 pub mod validation;
 
 #[cfg(test)]
+mod commands_test;
+#[cfg(test)]
+mod resolver_test;
+#[cfg(test)]
 mod schema_test;
 
+pub use commands::{InitArgs, SetArgs, GetArgs, cmd_init, cmd_set, cmd_get};
+pub use resolver::{resolve, ConfigSource, ResolveOptions, ResolvedConfig};
 pub use schema::GoyNodeConfig;
 
 use std::net::SocketAddr;
@@ -835,6 +843,11 @@ data_dir = "/var/lib/custom-goy"
 
     #[test]
     fn test_heartbeat_config_defaults_and_zero_interval_validation() -> anyhow::Result<()> {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        unsafe {
+            std::env::remove_var("GOY_NODE_HEARTBEAT_ENABLED");
+            std::env::remove_var("GOY_NODE_HEARTBEAT_INTERVAL_SECS");
+        }
         let toml_str = r#"
 [relay]
 url = "ws://127.0.0.1:7777"
