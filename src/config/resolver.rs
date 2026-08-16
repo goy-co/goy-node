@@ -113,23 +113,35 @@ pub fn resolve(opts: &ResolveOptions) -> Result<ResolvedConfig> {
     // ── Passo 3: CLI flags (sempre aplicadas) ──────────────────────────
     apply_cli_overrides(&mut config, opts, &mut sources);
 
-    // ── Passo 4: Validar campos obrigatórios ───────────────────────────
-    validate_required_fields(&config, opts, &sources)?;
+    // ── Passo 4: Prompts interativos (se faltar algo) ───────────────────
+    let prompt_result = super::prompts::prompt_missing_fields(&mut config, opts, &sources)?;
+    for (field, _) in &prompt_result.filled_fields {
+        sources.insert(field.clone(), ConfigSource::InteractivePrompt);
+    }
 
-    // ── Passo 5: Se auto-gerado, escrever config.toml ──────────────────
-    if auto_generated {
+    // ── Passo 5: Validação final de campos obrigatórios ────────────────
+    if config.coord.url.is_empty() {
+        bail!("coord.url is required but was not provided.");
+    }
+    if config.coord.admin_api_key.trim().is_empty() {
+        bail!("coord.admin_api_key is required but was not provided.");
+    }
+
+    // ── Passo 6: Escrever config se auto-gerado ou preenchido por prompts ─
+    let should_write = auto_generated || prompt_result.prompted;
+    if should_write {
         super::commands::write_config_auto(&config_path, &config)?;
-        info!("💾 Auto-generated config saved to {}", config_path.display());
+        info!("💾 Configuration saved to {}", config_path.display());
         warnings.push(format!(
-            "Auto-generated config at {}. Edit with 'goy-node config set'.",
+            "Configuration saved to {}. Edit with 'goy-node config set'.",
             config_path.display()
         ));
     }
 
-    // ── Passo 6: Validação completa ────────────────────────────────────
+    // ── Passo 7: Validação completa ────────────────────────────────────
     config.validate()?;
 
-    // ── Passo 7: Logging de transparência ──────────────────────────────
+    // ── Passo 8: Logging de transparência ──────────────────────────────
     log_resolved_config(&config, &sources);
 
     Ok(ResolvedConfig {
@@ -195,40 +207,6 @@ fn mark_cli_sources(sources: &mut HashMap<String, ConfigSource>, opts: &ResolveO
             ConfigSource::CliFlag("log-format".to_string()),
         );
     }
-}
-
-/// Verifica se os campos obrigatórios estão presentes ANTES de escrever o config.
-/// Falha apenas em modo --no-interactive quando falta algo essencial.
-fn validate_required_fields(
-    config: &GoyNodeConfig,
-    opts: &ResolveOptions,
-    _sources: &HashMap<String, ConfigSource>,
-) -> Result<()> {
-    let missing_url = config.coord.url.is_empty();
-    let missing_key = config.coord.admin_api_key.trim().is_empty();
-
-    if missing_url || missing_key {
-        if opts.no_interactive {
-            let mut missing = Vec::new();
-            if missing_url {
-                missing.push("coord.url (--coord-url)");
-            }
-            if missing_key {
-                missing.push("coord.admin_api_key (--admin-api-key)");
-            }
-
-            bail!(
-                "Missing required configuration in non-interactive mode:\n\
-                 • {}\n\n\
-                 Provide these via CLI flags or run without --no-interactive for interactive setup.\n\
-                 Example: goy-node --coord-url http://host:8080 --admin-api-key KEY onboard --auth-key gc_...",
-                missing.join("\n• ")
-            );
-        }
-        // Modo interativo: será tratado no DEV-79 (prompts)
-    }
-
-    Ok(())
 }
 
 /// Mapeamento de env vars → campos do config.
@@ -409,7 +387,7 @@ pub fn mask_secret(s: &str) -> String {
 
 /// Retorna um GoyNodeConfig com todos os defaults preenchidos.
 /// Usado quando não existe config.toml.
-fn default_goy_node_config() -> GoyNodeConfig {
+pub(crate) fn default_goy_node_config() -> GoyNodeConfig {
     GoyNodeConfig {
         coord: super::schema::CoordConfig {
             url: String::new(),           // Obrigatório — deve ser fornecido

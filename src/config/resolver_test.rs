@@ -151,7 +151,10 @@ mod tests {
         assert!(config_path.exists());
         assert_eq!(resolved.config.coord.url, "http://auto:8080");
         assert_eq!(resolved.config.coord.admin_api_key, "auto_key_12345");
-        assert!(resolved.warnings.iter().any(|w| w.contains("Auto-generated")));
+        assert!(resolved
+            .warnings
+            .iter()
+            .any(|w| w.contains("Configuration saved") || w.contains("Auto-generated")));
     }
 
     #[test]

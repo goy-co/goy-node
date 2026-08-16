@@ -297,3 +297,57 @@ fn test_first_run_auto_generate_cli() {
     assert!(content.contains("http://10.0.0.5:8080"));
     assert!(content.contains("auto_secret_12345"));
 }
+
+#[test]
+fn test_non_interactive_without_config_fails_cleanly() {
+    Command::cargo_bin("goy-node")
+        .unwrap()
+        .args([
+            "--no-interactive",
+            "onboard",
+            "--auth-key",
+            "gc_test_1234567890",
+        ])
+        .env_remove("GOY_API_URL")
+        .env_remove("GOY_ADMIN_API_KEY")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("non-interactive"))
+        .stderr(predicate::str::contains("--coord-url"))
+        .stderr(predicate::str::contains("--admin-api-key"));
+}
+
+#[test]
+fn test_non_interactive_with_all_flags_succeeds() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let config_path = dir.path().join("config.toml");
+
+    Command::cargo_bin("goy-node")
+        .unwrap()
+        .args([
+            "--config",
+            config_path.to_str().unwrap(),
+            "--coord-url",
+            "http://test:8080",
+            "--admin-api-key",
+            "test_key_12345",
+            "--no-interactive",
+            "config",
+            "validate",
+        ])
+        .assert()
+        .success();
+}
+
+#[test]
+fn test_piped_input_fails_gracefully() {
+    Command::cargo_bin("goy-node")
+        .unwrap()
+        .args(["onboard", "--auth-key", "gc_test_1234567890"])
+        .env_remove("GOY_API_URL")
+        .env_remove("GOY_ADMIN_API_KEY")
+        .write_stdin("")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("not a terminal"));
+}

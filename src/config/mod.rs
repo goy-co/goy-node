@@ -1,11 +1,14 @@
 pub mod commands;
 pub mod compat;
+pub mod prompts;
 pub mod resolver;
 pub mod schema;
 pub mod validation;
 
 #[cfg(test)]
 mod commands_test;
+#[cfg(test)]
+mod prompts_test;
 #[cfg(test)]
 mod resolver_test;
 #[cfg(test)]
