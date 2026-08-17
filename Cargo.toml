@@ -48,7 +48,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 
 # Diretórios padrão (XDG)
-directories = "5"
+directories = "6"
 
 # Graceful shutdown / cancellation
 tokio-util = "0.7"
