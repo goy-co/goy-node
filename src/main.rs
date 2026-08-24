@@ -11,21 +11,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{error, info};
 use tracing_subscriber::{EnvFilter, fmt};
 
-mod cli;
-mod config;
-mod consistent_hash;
-mod event_types;
-mod goy_api;
-mod heartbeat;
-mod http;
-mod mesh;
-mod metrics;
-mod onboard;
-mod rate_limiter;
-mod registry;
-mod relay;
-mod storage;
-mod tls;
+use goy_node::{cli, config, mesh, onboard, relay, storage};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {

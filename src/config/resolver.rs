@@ -129,7 +129,7 @@ pub fn resolve(opts: &ResolveOptions) -> Result<ResolvedConfig> {
 
     // ── Passo 4: Prompts interativos (se faltar algo) ───────────────────
     let prompt_result = super::prompts::prompt_missing_fields(&mut config, opts, &sources)?;
-    for (field, _) in &prompt_result.filled_fields {
+    for field in prompt_result.filled_fields.keys() {
         sources.insert(field.clone(), ConfigSource::InteractivePrompt);
     }
 
@@ -242,10 +242,10 @@ pub fn scan_deprecated_env_vars() -> Vec<(&'static str, &'static str, String)> {
         if *config_field == "(path)" {
             continue;
         }
-        if let Ok(value) = std::env::var(env_var) {
-            if !value.trim().is_empty() {
-                found.push((*env_var, *config_field, value));
-            }
+        if let Ok(value) = std::env::var(env_var)
+            && !value.trim().is_empty()
+        {
+            found.push((*env_var, *config_field, value));
         }
     }
     found

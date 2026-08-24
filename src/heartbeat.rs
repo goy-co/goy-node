@@ -46,6 +46,7 @@ pub struct HeartbeatService {
 
 impl HeartbeatService {
     /// Cria uma nova instância do `HeartbeatService`.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         config: HeartbeatConfig,
         registry_url: String,
